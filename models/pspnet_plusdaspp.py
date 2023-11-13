@@ -12,7 +12,6 @@ from itertools import chain
 -> ResNet BackBone
 '''
 
-
 class ResNet(nn.Module):
     def __init__(self, in_channels=3, output_stride=16, backbone='resnet50', pretrained=True, dialated=True):
         super(ResNet, self).__init__()

@@ -52,10 +52,9 @@ class DUC(nn.Module):
 -> ResNet BackBone
 '''
 
-class ResNet_HDC_DUC(nn.Module):
-    def __init__(self, in_channels, output_stride, pretrained=True, dilation_bigger=False, backbone='resnet50'):
-        super(ResNet_HDC_DUC, self).__init__()
-
+class ResNet(nn.Module):
+    def __init__(self, in_channels=3, output_stride=16, backbone='resnet50', pretrained=True, dialated=True):
+        super(ResNet, self).__init__()
         model = getattr(models, backbone)(pretrained)
         if not pretrained or in_channels != 3:
             self.layer0 = nn.Sequential(
@@ -73,34 +72,28 @@ class ResNet_HDC_DUC(nn.Module):
         self.layer3 = model.layer3
         self.layer4 = model.layer4
 
-        if output_stride == 4: list(self.layer0.children())[0].stride = (1, 1)
+        if dialated:
+            if output_stride == 16:
+                s3, s4, d3, d4 = (2, 1, 1, 2)
+            elif output_stride == 8:
+                s3, s4, d3, d4 = (1, 1, 2, 4)
 
-        d_res4b = []
-        if dilation_bigger:
-            d_res4b.extend([1, 2, 5, 9]*5 + [1, 2, 5])
-            d_res5b = [5, 9, 17]
-        else:
-            # Dialtion-RF
-            d_res4b.extend([1, 2, 3]*7 + [2, 2])
-            d_res5b = [3, 4, 5]
+            if output_stride == 8:
+                for n, m in self.layer3.named_modules():
+                    if 'conv1' in n and (backbone == 'resnet34' or backbone == 'resnet18'):
+                        m.dilation, m.padding, m.stride = (d3, d3), (d3, d3), (s3, s3)
+                    elif 'conv2' in n:
+                        m.dilation, m.padding, m.stride = (d3, d3), (d3, d3), (s3, s3)
+                    elif 'downsample.0' in n:
+                        m.stride = (s3, s3)
 
-        l_index = 0
-        for n, m in self.layer3.named_modules():
-            if 'conv2' in n:
-                d = d_res4b[l_index]
-                m.dilation, m.padding, m.stride = (d, d), (d, d), (1, 1)
-                l_index += 1
-            elif 'downsample.0' in n:
-                m.stride = (1, 1)
-
-        l_index = 0
-        for n, m in self.layer4.named_modules():
-            if 'conv2' in n:
-                d = d_res5b[l_index]
-                m.dilation, m.padding, m.stride = (d, d), (d, d), (1, 1)
-                l_index += 1
-            elif 'downsample.0' in n:
-                m.stride = (1, 1)
+            for n, m in self.layer4.named_modules():
+                if 'conv1' in n and (backbone == 'resnet34' or backbone == 'resnet18'):
+                    m.dilation, m.padding, m.stride = (d4, d4), (d4, d4), (s4, s4)
+                elif 'conv2' in n:
+                    m.dilation, m.padding, m.stride = (d4, d4), (d4, d4), (s4, s4)
+                elif 'downsample.0' in n:
+                    m.stride = (s4, s4)
 
     def forward(self, x):
         x = self.layer0(x)
@@ -123,9 +116,9 @@ def assp_branch(in_channels, out_channles, kernel_size, dilation):
             nn.BatchNorm2d(out_channles),
             nn.ReLU(inplace=True))
 
-class ASSP(nn.Module):
+class ASPP(nn.Module):
     def __init__(self, in_channels, output_stride, assp_channels=6):
-        super(ASSP, self).__init__()
+        super(ASPP, self).__init__()
 
         assert output_stride in [4, 8], 'Only output strides of 8 or 16 are suported'
         assert assp_channels in [4, 6], 'Number of suported ASSP branches are 4 or 6'
@@ -208,17 +201,17 @@ class Decoder(nn.Module):
         return x
 
 '''
--> Deeplab V3 + with DUC & HDC
+-> Deeplab + with DUC
 '''
 
-class DeepLab_DUC_HDC(BaseModel):
+class DeepLab_DUC(BaseModel):
     def __init__(self, num_classes, in_channels=3, pretrained=True, output_stride=8, backbone='resnet50', freeze_bn=False, **_):
-        super(DeepLab_DUC_HDC, self).__init__()
+        super(DeepLab_DUC, self).__init__()
 
-        self.backbone = ResNet_HDC_DUC(in_channels=in_channels, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
+        self.backbone = ResNet(in_channels=in_channels, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
         low_level_channels = 256
 
-        self.ASSP = ASSP(in_channels=2048, output_stride=output_stride)
+        self.ASPP = ASPP(in_channels=2048, output_stride=output_stride)
         self.decoder = Decoder(low_level_channels, num_classes)
         self.DUC_out = DUC(num_classes, num_classes, 4)
         if freeze_bn: self.freeze_bn()
@@ -228,7 +221,7 @@ class DeepLab_DUC_HDC(BaseModel):
     def forward(self, x):
         H, W = x.size(2), x.size(3)
         x, low_level_features = self.backbone(x)
-        x = self.ASSP(x)
+        x = self.ASPP(x)
         x = self.decoder(x, low_level_features)
         x = self.DUC_out(x)
         return x
@@ -237,9 +230,73 @@ class DeepLab_DUC_HDC(BaseModel):
         return self.backbone.parameters()
 
     def get_decoder_params(self):
-        return chain(self.ASSP.parameters(), self.decoder.parameters(), self.DUC_out.parameters())
+        return chain(self.ASPP.parameters(), self.decoder.parameters(), self.DUC_out.parameters())
 
     def freeze_bn(self):
         for module in self.modules():
             if isinstance(module, nn.BatchNorm2d): module.eval()
 
+'''
+    PSPnet + DUC
+'''
+
+class PSPModule(nn.Module):
+    def __init__(self, in_channels, bin_sizes, norm_layer):
+        super(PSPModule, self).__init__()
+        out_channels = in_channels // len(bin_sizes)
+        self.stages = nn.ModuleList([self._make_stages(in_channels, out_channels, b_s, norm_layer)
+                                     for b_s in bin_sizes])
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(in_channels + (out_channels * len(bin_sizes)), out_channels,
+                      kernel_size=3, padding=1, bias=False),
+            norm_layer(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.1)
+        )
+
+    def _make_stages(self, in_channels, out_channels, bin_sz, norm_layer):
+        prior = nn.AdaptiveAvgPool2d(output_size=bin_sz)
+        conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+        bn = norm_layer(out_channels)
+        relu = nn.ReLU(inplace=True)
+        return nn.Sequential(prior, conv, bn, relu)
+
+    def forward(self, features):
+        h, w = features.size()[2], features.size()[3]
+        pyramids = [features]
+        pyramids.extend([F.interpolate(stage(features), size=(h, w), mode='bilinear',
+                                       align_corners=True) for stage in self.stages])
+        output = self.bottleneck(torch.cat(pyramids, dim=1))
+        return output
+
+class PSP_DUC(BaseModel):
+    def __init__(self, num_classes, in_channels=3, pretrained=True, output_stride=8, backbone='resnet50', freeze_bn=False, **_):
+        super(PSP_DUC, self).__init__()
+        norm_layer = nn.BatchNorm2d
+        self.backbone = ResNet(in_channels=in_channels, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
+        low_level_channels = 256
+
+        self.PSP = PSPModule(2048, bin_sizes=[1, 2, 3, 6], norm_layer=norm_layer)
+        # self.decoder = Decoder(low_level_channels, num_classes)
+        self.DUC_out = DUC(num_classes, num_classes, 4)
+        if freeze_bn: self.freeze_bn()
+        # if freeze_backbone:
+        #     set_trainable([self.backbone], False)
+
+    def forward(self, x):
+        H, W = x.size(2), x.size(3)
+        x, low_level_features = self.backbone(x)
+        x = self.ASSP(x)
+        # x = self.decoder(x, low_level_features)
+        x = self.DUC_out(x)
+        return x
+
+    def get_backbone_params(self):
+        return self.backbone.parameters()
+
+    def get_decoder_params(self):
+        return chain(self.PSP.parameters(), self.DUC_out.parameters())
+
+    def freeze_bn(self):
+        for module in self.modules():
+            if isinstance(module, nn.BatchNorm2d): module.eval()

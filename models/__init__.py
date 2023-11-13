@@ -10,6 +10,8 @@ from .upernet import UperNet
 from .pspnet import PSPNet
 from .pspnet import PSPDenseNet
 from .resnet import ResNet, BasicBlock, Bottleneck
-from .pspenhanced import DeepPSP
+# from .pspenhanced import DeepPSP
 from .densepsp import DensePSP
 from .pspnet_plusdaspp import PSPnet_plus
+# from .pspupsample import
+from .duc import DeepLab_DUC, PSP_DUC
