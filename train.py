@@ -23,7 +23,13 @@ def main(config, resume):
     val_loader = get_instance(dataloaders, 'val_loader', config)
 
     # MODEL
-    model = get_instance(models, 'arch', config, train_loader.dataset.num_classes)
+    if config['arch']['type'] == 'ResNet':
+        # model = get_instance(models, 'arch', config, *config['arch']['args'])
+        block = getattr(models, config['arch']['args']['block'])
+        model = getattr(models, 'ResNet')(block, config['arch']['args']['layers'])
+        print(model)
+    else:
+        model = get_instance(models, 'arch', config, train_loader.dataset.num_classes)
     print(f'\n{model}\n')
 
     # LOSS

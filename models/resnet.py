@@ -15,6 +15,9 @@ try:
 except ImportError:
     from urllib.request import urlretrieve
 
+from itertools import chain
+
+
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
            'resnet152', 'BasicBlock', 'Bottleneck']
 
@@ -23,7 +26,7 @@ model_urls = {
     'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
     'resnet50': 'https://s3.us-west-1.wasabisys.com/encoding/models/resnet50s-a75c83cf.zip',
     'resnet101': 'https://s3.us-west-1.wasabisys.com/encoding/models/resnet101s-03a0f310.zip',
-    'resnet152': 'https://s3.us-west-1.wasabisys.com/encoding/models/resnet152s-36670e8b.zip'
+    'resnet152': 'https://s3.us-west-1.wasabisys.com/encoding/models/resnet152s-36670e8b.zip',
 }
 
 
@@ -129,7 +132,7 @@ class ResNet(nn.Module):
         - Yu, Fisher, and Vladlen Koltun. "Multi-scale context aggregation by dilated convolutions."
     """
     # pylint: disable=unused-variable
-    def __init__(self, block, layers, num_classes=1000, dilated=True, multi_grid=False,
+    def __init__(self, block, layers, num_classes=1000, dilated=False, multi_grid=False,
                  deep_base=True, norm_layer=nn.BatchNorm2d):
         self.inplanes = 128 if deep_base else 64
         super(ResNet, self).__init__()
@@ -228,6 +231,16 @@ class ResNet(nn.Module):
 
         return x
 
+    def get_backbone_params(self):
+        return chain(self.initial.parameters(), self.layer1.parameters(), self.layer2.parameters(),
+                   self.layer3.parameters(), self.layer4.parameters())
+
+    def get_decoder_params(self):
+        return chain(self.master_branch.parameters(), self.auxiliary_branch.parameters())
+
+    def freeze_bn(self):
+        for module in self.modules():
+            if isinstance(module, nn.BatchNorm2d): module.eval()
 
 def resnet18(pretrained=False, **kwargs):
     """Constructs a ResNet-18 model.
@@ -264,6 +277,16 @@ def resnet50(pretrained=False, root='./pretrained', **kwargs):
         model.load_state_dict(load_url(model_urls['resnet50'], model_dir=root))
     return model
 
+def diamulti_resnet50(pretrained=False, root='./pretrained', **kwargs):
+    """Constructs a ResNet-50 model.
+
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNet(Bottleneck, [3, 4, 6, 3], dilated=True, multi_grid=True, **kwargs)
+    if pretrained:
+        model.load_state_dict(load_url(model_urls['diamulti_resnet50'], model_dir=root))
+    return model
 
 def resnet101(pretrained=False, root='./pretrained', **kwargs):
     """Constructs a ResNet-101 model.
@@ -275,7 +298,16 @@ def resnet101(pretrained=False, root='./pretrained', **kwargs):
     if pretrained:
         model.load_state_dict(load_url(model_urls['resnet101'], model_dir=root))
     return model
+def diamulti_resnet101(pretrained=False, root='./pretrained', **kwargs):
+    """Constructs a ResNet-101 model.
 
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNet(Bottleneck, [3, 4, 23, 3], dilated=True, multi_grid=True, **kwargs)
+    if pretrained:
+        model.load_state_dict(load_url(model_urls['resnet101'], model_dir=root))
+    return model
 
 def resnet152(pretrained=False, root='./pretrained', **kwargs):
     """Constructs a ResNet-152 model.

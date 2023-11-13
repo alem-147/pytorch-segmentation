@@ -33,8 +33,10 @@ class BaseTrainer:
         if config["use_synch_bn"]:
             self.model = convert_model(self.model)
             self.model = DataParallelWithCallback(self.model, device_ids=availble_gpus)
-        else:
+        elif len(availble_gpus) > 0:
             self.model = torch.nn.DataParallel(self.model, device_ids=availble_gpus)
+        # else:
+        #     self.model = torch.nn.DataParallel(self.model, device_ids=availble_gpus)
         self.model.to(self.device)
 
         # CONFIGS
@@ -89,6 +91,8 @@ class BaseTrainer:
         elif n_gpu > sys_gpu:
             self.logger.warning(f'Nbr of GPU requested is {n_gpu} but only {sys_gpu} are available')
             n_gpu = sys_gpu
+        elif n_gpu == 0:
+            self.logger.warning('No GPUs requested, using the CPU')
             
         device = torch.device('cuda:0' if n_gpu > 0 else 'cpu')
         self.logger.info(f'Detected GPUs: {sys_gpu} Requested: {n_gpu}')

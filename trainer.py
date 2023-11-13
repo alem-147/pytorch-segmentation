@@ -49,14 +49,15 @@ class Trainer(BaseTrainer):
         for batch_idx, (data, target) in enumerate(tbar):
             self.data_time.update(time.time() - tic)
             #data, target = data.to(self.device), target.to(self.device)
-            self.lr_scheduler.step(epoch=epoch-1)
+            # self.lr_scheduler.step(epoch=epoch-1)
 
             # LOSS & OPTIMIZE
             self.optimizer.zero_grad()
             output = self.model(data)
-            if self.config['arch']['type'][:3] == 'PSP':
+            if (self.config['arch']['type'][:3] == 'PSP' or self.config['arch']['type'][::-1][:3] == 'PSP')\
+                    and self.config['arch']['args']['use_aux'] == True:
                 assert output[0].size()[2:] == target.size()[1:]
-                assert output[0].size()[1] == self.num_classes 
+                assert output[0].size()[1] == self.num_classes
                 loss = self.loss(output[0], target)
                 loss += self.loss(output[1], target) * 0.4
                 output = output[0]
@@ -70,7 +71,7 @@ class Trainer(BaseTrainer):
             loss.backward()
             self.optimizer.step()
             self.total_loss.update(loss.item())
-
+            self.lr_scheduler.step(epoch=epoch-1)
             # measure elapsed time
             self.batch_time.update(time.time() - tic)
             tic = time.time()

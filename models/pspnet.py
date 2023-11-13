@@ -42,6 +42,7 @@ class PSPNet(BaseModel):
     def __init__(self, num_classes, in_channels=3, backbone='resnet152', pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False):
         super(PSPNet, self).__init__()
         norm_layer = nn.BatchNorm2d
+        # by default resolve to torchvision.models.resnet152(True, norm_layer) - this loads the prtrained weights in a depricated manner
         model = getattr(resnet, backbone)(pretrained, norm_layer=norm_layer)
         m_out_sz = model.fc.in_features
         self.use_aux = use_aux 

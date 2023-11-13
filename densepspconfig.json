@@ -1,15 +1,17 @@
 {
-  "name": "PSPNet",
+  "name": "DensePSP",
   "n_gpu": 1,
   "use_synch_bn": false,
 
     "arch": {
-        "type": "PSPNet",
+        "type": "DensePSP",
         "args": {
             "backbone": "resnet50",
             "freeze_bn": false,
             "freeze_backbone": false,
-            "use_aux": true
+            "use_aux": false,
+            "output_stride": 8,
+            "inter_channels": 128
         }
     },
 

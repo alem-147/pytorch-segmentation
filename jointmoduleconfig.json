@@ -1,15 +1,17 @@
 {
-  "name": "PSPNet",
+  "name": "JointPSP",
   "n_gpu": 1,
   "use_synch_bn": false,
 
     "arch": {
-        "type": "PSPNet",
+        "type": "DeepPSP",
         "args": {
-            "backbone": "resnet50",
+            "backbone": "resnet",
             "freeze_bn": false,
             "freeze_backbone": false,
-            "use_aux": true
+            "deeplab": "aspp",
+            "use_aux": true,
+            "output_stride": 8
         }
     },
 

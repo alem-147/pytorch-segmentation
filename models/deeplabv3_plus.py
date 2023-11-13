@@ -13,7 +13,7 @@ from itertools import chain
 '''
 
 class ResNet(nn.Module):
-    def __init__(self, in_channels=3, output_stride=16, backbone='resnet101', pretrained=True):
+    def __init__(self, in_channels=3, output_stride=16, backbone='resnet50', pretrained=True):
         super(ResNet, self).__init__()
         model = getattr(models, backbone)(pretrained)
         if not pretrained or in_channels != 3:
@@ -264,7 +264,7 @@ class ASSP(nn.Module):
         assert output_stride in [8, 16], 'Only output strides of 8 or 16 are suported'
         if output_stride == 16: dilations = [1, 6, 12, 18]
         elif output_stride == 8: dilations = [1, 12, 24, 36]
-        
+
         self.aspp1 = assp_branch(in_channels, 256, 1, dilation=dilations[0])
         self.aspp2 = assp_branch(in_channels, 256, 3, dilation=dilations[1])
         self.aspp3 = assp_branch(in_channels, 256, 3, dilation=dilations[2])
@@ -275,7 +275,7 @@ class ASSP(nn.Module):
             nn.Conv2d(in_channels, 256, 1, bias=False),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True))
-        
+
         self.conv1 = nn.Conv2d(256*5, 256, 1, bias=False)
         self.bn1 = nn.BatchNorm2d(256)
         self.relu = nn.ReLU(inplace=True)
