@@ -13,5 +13,5 @@ from .resnet import ResNet, BasicBlock, Bottleneck
 # from .pspenhanced import DeepPSP
 from .densepsp import DensePSP
 from .pspnet_plusdaspp import PSPnet_plus
-# from .pspupsample import
 from .duc import DeepLab_DUC, PSP_DUC
+from .dunet import DUNet
