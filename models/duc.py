@@ -53,7 +53,7 @@ class DUC(nn.Module):
 '''
 
 class ResNet(nn.Module):
-    def __init__(self, in_channels=3, output_stride=16, backbone='resnet50', pretrained=True, dialated=True):
+    def __init__(self, in_channels=3, output_stride=16, backbone='resnet50', pretrained=True, dilated=True):
         super(ResNet, self).__init__()
         model = getattr(models, backbone)(pretrained)
         if not pretrained or in_channels != 3:
@@ -72,7 +72,7 @@ class ResNet(nn.Module):
         self.layer3 = model.layer3
         self.layer4 = model.layer4
 
-        if dialated:
+        if dilated:
             if output_stride == 16:
                 s3, s4, d3, d4 = (2, 1, 1, 2)
             elif output_stride == 8:
@@ -100,10 +100,10 @@ class ResNet(nn.Module):
         x = self.layer1(x)
         low_level_features = x
         x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x_aux = self.layer3(x)
+        x = self.layer4(x_aux)
 
-        return x, low_level_features
+        return x, low_level_features, x_aux
 
 ''' 
 -> The Atrous Spatial Pyramid Pooling
@@ -211,6 +211,7 @@ class DeepLab_DUC(BaseModel):
         self.backbone = ResNet(in_channels=in_channels, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
         low_level_channels = 256
 
+
         self.ASPP = ASPP(in_channels=2048, output_stride=output_stride)
         self.decoder = Decoder(low_level_channels, num_classes)
         self.DUC_out = DUC(num_classes, num_classes, 4)
@@ -220,7 +221,7 @@ class DeepLab_DUC(BaseModel):
 
     def forward(self, x):
         H, W = x.size(2), x.size(3)
-        x, low_level_features = self.backbone(x)
+        x, low_level_features, x_aux = self.backbone(x)
         x = self.ASPP(x)
         x = self.decoder(x, low_level_features)
         x = self.DUC_out(x)
@@ -270,32 +271,70 @@ class PSPModule(nn.Module):
         return output
 
 class PSP_DUC(BaseModel):
-    def __init__(self, num_classes, in_channels=3, pretrained=True, output_stride=8, backbone='resnet50', freeze_bn=False, **_):
+    def __init__(self, num_classes, in_channels=3, pretrained=True, output_stride=8, 
+                 backbone='resnet50', freeze_bn=False, use_aux=False, dilated=True, **_):
         super(PSP_DUC, self).__init__()
         norm_layer = nn.BatchNorm2d
-        self.backbone = ResNet(in_channels=in_channels, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
+        self.use_aux = use_aux 
+        self.backbone = ResNet(in_channels=in_channels, dilated=dilated, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
         low_level_channels = 256
+        m_out_sz = 2048
 
+        if dilated:
+            if output_stride == 8:
+                upscale = 8
+                aux_upscale = 8
+            elif output_stride == 16:
+                # need to test these
+                upscale = 16
+                aux_upscale = 16
+        else:
+            upscale = 32
+            aux_upscale = 16
+        # style of pspnet
         self.PSP = PSPModule(2048, bin_sizes=[1, 2, 3, 6], norm_layer=norm_layer)
+        self.classifier = nn.Conv2d(512, num_classes, kernel_size=1)
+
         # self.decoder = Decoder(low_level_channels, num_classes)
-        self.DUC_out = DUC(num_classes, num_classes, 4)
+        self.DUC_out = DUC(num_classes, num_classes, upscale)
+        # self.DUC_aux = DUC(num_classes, num_classes, aux_upscale)
+
+        self.auxiliary_branch = nn.Sequential(
+            nn.Conv2d(m_out_sz//2, m_out_sz//4, kernel_size=3, padding=1, bias=False),
+            norm_layer(m_out_sz//4),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.1),
+            nn.Conv2d(m_out_sz//4, num_classes, kernel_size=1)
+        )
         if freeze_bn: self.freeze_bn()
         # if freeze_backbone:
         #     set_trainable([self.backbone], False)
 
     def forward(self, x):
-        H, W = x.size(2), x.size(3)
-        x, low_level_features = self.backbone(x)
-        x = self.ASSP(x)
+        input_size = (x.size()[2], x.size()[3])
+        x, low_level_features, x_aux = self.backbone(x)
+        x = self.PSP(x)
+        x = self.classifier(x)
         # x = self.decoder(x, low_level_features)
         x = self.DUC_out(x)
+
+        if x.size() != input_size:
+            # One pixel added with a conv with stride 2 when the input size in odd
+            x = x[:, :, :input_size[0], :input_size[1]]
+
+        if self.training and self.use_aux:
+            aux = self.auxiliary_branch(x_aux)
+            aux = F.interpolate(aux, size=input_size, mode='bilinear')
+            aux = aux[:, :, :input_size[0], :input_size[1]]
+            return x, aux
         return x
 
     def get_backbone_params(self):
         return self.backbone.parameters()
 
     def get_decoder_params(self):
-        return chain(self.PSP.parameters(), self.DUC_out.parameters())
+        return chain(self.PSP.parameters(), self.classifier.parameters(), self.DUC_out.parameters(),
+                     self.auxiliary_branch.parameters())
 
     def freeze_bn(self):
         for module in self.modules():
