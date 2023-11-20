@@ -44,13 +44,16 @@ class _PSPModule(nn.Module):
         out_channels = in_channels // len(bin_sizes)
         self.stages = nn.ModuleList([self._make_stages(in_channels, out_channels, b_s, norm_layer) 
                                                         for b_s in bin_sizes])
+        low_level_channels = 1088
+        inter_channels = 512
         self.bottleneck = nn.Sequential(
-            nn.Conv2d(in_channels+(out_channels * len(bin_sizes)), out_channels, 
+            nn.Conv2d(low_level_channels +(out_channels * len(bin_sizes)) + inter_channels, out_channels, 
                                     kernel_size=3, padding=1, bias=False),
             norm_layer(out_channels),
             nn.ReLU(inplace=True),
             nn.Dropout2d(0.1)
         )
+        self.fuse = FeatureFused(in_channels, inter_channels=inter_channels, norm_layer=norm_layer)
 
     def _make_stages(self, in_channels, out_channels, bin_sz, norm_layer):
         prior = nn.AdaptiveAvgPool2d(output_size=bin_sz)
@@ -59,14 +62,34 @@ class _PSPModule(nn.Module):
         relu = nn.ReLU(inplace=True)
         return nn.Sequential(prior, conv, bn, relu)
     
-    def forward(self, features):
-        h, w = features.size()[2], features.size()[3]
-        pyramids = [features]
+    def forward(self, features, low_level_features):
+        h, w = low_level_features.size()[2], low_level_features.size()[3]
+        pyramids = [self.fuse(features, low_level_features)]
+        
         pyramids.extend([F.interpolate(stage(features), size=(h, w), mode='bilinear', 
                                         align_corners=True) for stage in self.stages])
+        # print('pyramaids',torch.cat(pyramids, dim=1).size())
         output = self.bottleneck(torch.cat(pyramids, dim=1))
+        # print('output')
         return output
-    
+
+class FeatureFused(nn.Module):
+    """Module for fused features"""
+
+    def __init__(self, high_level_channels, inter_channels=512, norm_layer=nn.BatchNorm2d, **kwargs):
+        super(FeatureFused, self).__init__()
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(high_level_channels, inter_channels, 1, bias=False),
+            norm_layer(inter_channels),
+            nn.ReLU(True)
+        )
+
+    def forward(self, x, low_level_features):
+        size = low_level_features.size()[2:]
+        x = self.conv2(F.interpolate(x, size, mode='bilinear', align_corners=True))
+        fused_feature = torch.cat([x, low_level_features], dim=1)
+        return fused_feature
+
 ''' 
 -> ResNet BackBone
 '''
@@ -115,32 +138,17 @@ class ResNet(nn.Module):
 
     def forward(self, x):
         x = self.layer0(x)
+        x_13 = x
         x = self.layer1(x)
         low_level_features = x
         x = self.layer2(x)
         x_aux = self.layer3(x)
         x = self.layer4(x_aux)
-
+        #1024+64 features -> 1088 low level feauture
+        x_13 = F.interpolate(x_13, [x_aux.size()[2], x_aux.size()[3]], mode='bilinear', align_corners=True)
+        low_level_features = torch.cat((x_13, x_aux), dim=1)
+        # assert False
         return x, low_level_features, x_aux
-
-
-class FeatureFused(nn.Module):
-    """Module for fused features"""
-
-    def __init__(self, in_channels, inter_channels=512, norm_layer=nn.BatchNorm2d, **kwargs):
-        super(FeatureFused, self).__init__()
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(in_channels, inter_channels, 1, bias=False),
-            norm_layer(inter_channels),
-            nn.ReLU(True)
-        )
-
-    def forward(self, x, low_level_features):
-        size = low_level_features.size()[2:]
-        x = self.conv2(F.interpolate(x, size, mode='bilinear', align_corners=True))
-        fused_feature = torch.cat([x, low_level_features], dim=1)
-        return fused_feature
-
 
 
 class PSPDUNet(BaseModel):
@@ -149,9 +157,11 @@ class PSPDUNet(BaseModel):
         super(PSPDUNet, self).__init__()
         norm_layer = nn.BatchNorm2d
         self.use_aux = use_aux
-        self.backbone = ResNet(in_channels=in_channels, dilated=dilated, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
+        bin_sizes = [1, 2, 3, 6]
         m_out_sz = 2048
-        self.psp_module = _PSPModule(m_out_sz, bin_sizes=[1, 2, 3, 6], norm_layer=norm_layer)
+
+        self.backbone = ResNet(in_channels=in_channels, dilated=dilated, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
+        self.psp_module = _PSPModule(m_out_sz, bin_sizes=bin_sizes, norm_layer=norm_layer)
         self.dupsample = DUpsampling(m_out_sz//4, num_classes, scale_factor=output_stride)
 
         self.auxiliary_branch = nn.Sequential(
@@ -172,14 +182,16 @@ class PSPDUNet(BaseModel):
         if freeze_backbone: 
             set_trainable([self.initial, self.layer1, self.layer2, self.layer3, self.layer4], False)
 
-    # TODO - 1. temp softmax 2. incorporate low level feautres and temp softmax
+    # 2. incorporate low level feautres and temp softmax
     # TODO - 3. lr schedulers 4. focal loss
-    # TODO - 5. dialate
+    # TODO - mash bilinear and dupsample together to keep global and fine grain together 
+
+    # TODO - training: ll feautres -> before pooling, after pooling
     # 11-17_09-55 -> base implementation
     def forward(self, x):
         input_size = (x.size()[2], x.size()[3])
         x, low_level_features, x_aux = self.backbone(x)
-        x = self.psp_module(x)
+        x = self.psp_module(x, low_level_features)
         # print('x', x.size())
         output = self.dupsample(x)
         # print('output', output.size())
