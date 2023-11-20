@@ -1,13 +1,13 @@
 {
-  "name": "DUNet",
+  "name": "ResNet",
   "n_gpu": 1,
-  "use_synch_bn": false,
+  "use_synch_bn": true,
 
     "arch": {
-        "type": "DUNet",
+        "type": "ResNet",
         "args": {
-            "freeze_bn": false,
-            "backbone": "resnet50"
+          "block": "BasicBlock",
+          "layers": [2,2,2,2]
         }
     },
 
@@ -37,7 +37,7 @@
             "crop_size": 480,
             "val": true,
             "split": "val",
-            "num_workers": 8
+            "num_workers": 4
         }
     },
 
@@ -59,7 +59,7 @@
     },
 
     "trainer": {
-        "epochs": 40,
+        "epochs": 60,
         "save_dir": "saved/",
         "save_period": 10,
 

@@ -13,37 +13,36 @@ from itertools import chain
 adapted from https://github.com/hali1122/DUpsampling/blob/master/models/dunet.py
 '''
 
-class DUpsampling(nn.Module):
-    def __init__(self, inplanes, scale, num_class=21, pad=0):
-        super(DUpsampling, self).__init__()
-        ## W matrix
-        self.conv_w = nn.Conv2d(inplanes, num_class * scale * scale, kernel_size=1, padding=pad, bias=False)
-        ## P matrix
-        self.conv_p = nn.Conv2d(num_class * scale * scale, inplanes, kernel_size=1, padding=pad, bias=False)
 
-        self.scale = scale
+class DUpsampling(nn.Module):
+    """DUsampling module"""
+
+    def __init__(self, in_channels, out_channels, scale_factor=2, **kwargs):
+        super(DUpsampling, self).__init__()
+        self.scale_factor = scale_factor
+        self.conv_w = nn.Conv2d(in_channels, out_channels * scale_factor * scale_factor, 1, bias=False)
 
     def forward(self, x):
         x = self.conv_w(x)
-        N, C, H, W = x.size()
+        n, c, h, w = x.size()
 
-        # N, W, H, C
-        x_permuted = x.permute(0, 3, 2, 1)
+        # N, C, H, W --> N, W, H, C
+        x = x.permute(0, 3, 2, 1).contiguous()
 
-        # N, W, H*scale, C/scale
-        x_permuted = x_permuted.contiguous().view((N, W, H * self.scale, int(C / (self.scale))))
+        # N, W, H, C --> N, W, H * scale, C // scale
+        x = x.view(n, w, h * self.scale_factor, c // self.scale_factor)
 
-        # N, H*scale, W, C/scale
-        x_permuted = x_permuted.permute(0, 2, 1, 3)
-        # N, H*scale, W*scale, C/(scale**2)
-        x_permuted = x_permuted.contiguous().view(
-            (N, W * self.scale, H * self.scale, int(C / (self.scale * self.scale))))
+        # N, W, H * scale, C // scale --> N, H * scale, W, C // scale
+        x = x.permute(0, 2, 1, 3).contiguous()
 
-        # N, C/(scale**2), H*scale, W*scale
-        x = x_permuted.permute(0, 3, 1, 2)
+        # N, H * scale, W, C // scale --> N, H * scale, W * scale, C // (scale ** 2)
+        x = x.view(n, h * self.scale_factor, w * self.scale_factor, c // (self.scale_factor * self.scale_factor))
+
+        # N, H * scale, W * scale, C // (scale ** 2) -- > N, C // (scale ** 2), H * scale, W * scale
+        x = x.permute(0, 3, 1, 2)
 
         return x
-
+    
 ''' 
 -> ResNet BackBone
 '''
@@ -86,66 +85,64 @@ class ResNet(nn.Module):
         low_level_features = torch.cat((x_13, x_46), dim=1)
         return x, low_level_features
 
-class Decoder(nn.Module):
-    def __init__(self, num_class, bn_momentum=0.1):
-        super(Decoder, self).__init__()
-        self.conv1 = nn.Conv2d(1152, 48, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(48)
-        self.relu = nn.ReLU()
-        # self.conv2 = SeparableConv2d(304, 256, kernel_size=3)
-        # self.conv3 = SeparableConv2d(256, 256, kernel_size=3)
-        self.conv2 = nn.Conv2d(2096, 256, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(256)
-        self.dropout2 = nn.Dropout(0.5)
-        self.conv3 = nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(256)
-        self.dropout3 = nn.Dropout(0.1)
-        self.conv4 = nn.Conv2d(256, 256, kernel_size=1)
+class _DUHead(nn.Module):
+    def __init__(self, in_channels, norm_layer=nn.BatchNorm2d, **kwargs):
+        super(_DUHead, self).__init__()
+        self.fuse = FeatureFused(norm_layer=norm_layer, **kwargs)
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, 256, 3, padding=1, bias=False),
+            norm_layer(256),
+            nn.ReLU(True),
+            nn.Conv2d(256, 256, 3, padding=1, bias=False),
+            norm_layer(256),
+            nn.ReLU(True)
+        )
 
-        self.dupsample = DUpsampling(256, 32, num_class=21)
-        self._init_weight()
-        self.T = torch.nn.Parameter(torch.Tensor([1.00]))
-
-    def forward(self, x, low_level_feature):
-        low_level_feature = self.conv1(low_level_feature)
-        low_level_feature = self.bn1(low_level_feature)
-        low_level_feature = self.relu(low_level_feature)
-        low_level_feature = F.interpolate(low_level_feature, [x.size()[2], x.size()[3]], mode='bilinear', align_corners=True)
-        x_4_cat = torch.cat((x, low_level_feature), dim=1)
-        x_4_cat = self.conv2(x_4_cat)
-        x_4_cat = self.bn2(x_4_cat)
-        x_4_cat = self.relu(x_4_cat)
-        x_4_cat = self.dropout2(x_4_cat)
-        x_4_cat = self.conv3(x_4_cat)
-        x_4_cat = self.bn3(x_4_cat)
-        x_4_cat = self.relu(x_4_cat)
-        x_4_cat = self.dropout3(x_4_cat)
-        x_4_cat = self.conv4(x_4_cat)
-
-        out = self.dupsample(x_4_cat)
-        out = out / self.T
+    def forward(self, x, low_level_features):
+        fused_feature = self.fuse(x, low_level_features)
+        out = self.block(fused_feature)
         return out
 
-    def _init_weight(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                torch.nn.init.kaiming_normal_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
+class FeatureFused(nn.Module):
+    """Module for fused features"""
+
+    def __init__(self, inter_channels=512, norm_layer=nn.BatchNorm2d, **kwargs):
+        super(FeatureFused, self).__init__()
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(2048, inter_channels, 1, bias=False),
+            norm_layer(inter_channels),
+            nn.ReLU(True)
+        )
+        # self.conv3 = nn.Sequential(
+        #     nn.Conv2d(1024, inter_channels, 1, bias=False),
+        #     norm_layer(inter_channels),
+        #     nn.ReLU(True)
+        # )
+
+    def forward(self, x, low_level_features):
+        size = low_level_features.size()[2:]
+        x = self.conv2(F.interpolate(x, size, mode='bilinear', align_corners=True))
+        fused_feature = torch.cat([x, low_level_features], dim=1)
+        return fused_feature
 
 
-class DUNet(nn.Module):
-    def __init__(self, num_classes, in_channels=3, pretrained=True, backbone='resnet50', **_):
+class DUNet(BaseModel):
+    def __init__(self, num_classes, in_channels=3, pretrained=True, backbone='resnet50', **kwargs):
         super(DUNet, self).__init__()
         norm_layer = nn.BatchNorm2d
         self.encoder = ResNet()
-        self.decoder = Decoder(num_classes)
+        self.head = _DUHead(1664, **kwargs)
+        self.dupsample = DUpsampling(256, num_classes, scale_factor=16, **kwargs)
+        # self.decoder = Decoder(num_classes)
 
     def forward(self, x):
         input_size = (x.size()[2], x.size()[3])
         x, x_low = self.encoder(x)
-        x = self.decoder(x, x_low)
+        x = self.head(x, x_low)
+        print('preup', x.size())
+        x = self.dupsample(x)
+        print('out', x.size())
+        # I think this is breaking stuff
         x = x[:, :, :input_size[0], :input_size[1]]
 
         return x
@@ -153,4 +150,5 @@ class DUNet(nn.Module):
         return chain(self.encoder.parameters())
 
     def get_decoder_params(self):
-        return chain(self.decoder.parameters())
+        return chain(self.head.parameters(), self.dupsample.parameters())
+    

@@ -15,3 +15,4 @@ from .densepsp import DensePSP
 from .pspnet_plusdaspp import PSPnet_plus
 from .duc import DeepLab_DUC, PSP_DUC
 from .dunet import DUNet
+from .dupspnet import PSPDUNet

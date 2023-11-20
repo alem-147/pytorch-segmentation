@@ -8,7 +8,8 @@
         "args": {
             "backbone": "resnet50",
             "freeze_bn": false,
-            "freeze_backbone": false
+            "freeze_backbone": false,
+            "use_aux": true
         }
     },
 
@@ -60,7 +61,7 @@
     },
 
     "trainer": {
-        "epochs": 60,
+        "epochs": 40,
         "save_dir": "saved/",
         "save_period": 10,
 
