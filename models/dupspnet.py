@@ -162,7 +162,11 @@ class PSPDUNet(BaseModel):
 
         self.backbone = ResNet(in_channels=in_channels, dilated=dilated, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
         self.psp_module = _PSPModule(m_out_sz, bin_sizes=bin_sizes, norm_layer=norm_layer)
-        self.dupsample = DUpsampling(m_out_sz//4, num_classes, scale_factor=output_stride)
+        self.conv = nn.Conv2d(m_out_sz // 4, 256, kernel_size=1)
+        self.dupsample = DUpsampling(256, num_classes, scale_factor=output_stride)
+
+        # self.dupsample = DUpsampling(m_out_sz//4, num_classes, scale_factor=output_stride)
+        # self.global_classifier = nn.Conv2d(m_out_sz//4, num_classes, kernel_size=1)
 
         self.auxiliary_branch = nn.Sequential(
             nn.Conv2d(m_out_sz//2, m_out_sz//4, kernel_size=3, padding=1, bias=False),
@@ -184,15 +188,20 @@ class PSPDUNet(BaseModel):
 
     # 2. incorporate low level feautres and temp softmax
     # TODO - 3. lr schedulers 4. focal loss
+    # TODO - conv maps before upsample
     # TODO - mash bilinear and dupsample together to keep global and fine grain together 
 
     # TODO - training: ll feautres -> before pooling, after pooling
+    # TODO - learn maps
+    # TODO - mash
     # 11-17_09-55 -> base implementation
     def forward(self, x):
         input_size = (x.size()[2], x.size()[3])
         x, low_level_features, x_aux = self.backbone(x)
         x = self.psp_module(x, low_level_features)
+        x = self.conv(x)
         # print('x', x.size())
+
         output = self.dupsample(x)
         # print('output', output.size())
         output = output[:, :, :input_size[0], :input_size[1]]
