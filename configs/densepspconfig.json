@@ -1,7 +1,8 @@
 {
-  "name": "DensePSP",
+  "name": "DensePSP - inital",
   "n_gpu": 1,
   "use_synch_bn": false,
+  "_comment": "with bins of 1, (2,3), (6,7)",
 
     "arch": {
         "type": "DensePSP",
@@ -9,9 +10,8 @@
             "backbone": "resnet50",
             "freeze_bn": false,
             "freeze_backbone": false,
-            "use_aux": false,
-            "output_stride": 8,
-            "inter_channels": 128
+            "use_aux": true,
+            "inter_channels": 64
         }
     },
 
