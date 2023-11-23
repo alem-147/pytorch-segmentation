@@ -1,14 +1,14 @@
 {
-  "name": "PSPDUNet - learn maps",
+  "name": "PSPDUNet - weight init",
   "n_gpu": 1,
   "use_synch_bn": false,
-  "_comment": "learn maps before upsample - like orignal psp",
+  "_comment": "use weight init tech to limit checkerboard",
     "arch": {
         "type": "PSPDUNet",
         "args": {
             "freeze_bn": false,
             "backbone": "resnet50",
-            "use_aux": true,
+            "use_aux": false,
             "temp_softmax": true,
             "dilated": true,
             "output_stride": 16

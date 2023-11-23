@@ -8,6 +8,44 @@ from base import BaseModel
 from utils.helpers import initialize_weights, set_trainable
 from itertools import chain
 
+class DUC(nn.Module):
+    def __init__(self, in_channels, out_channels, upscale):
+        super(DUC, self).__init__()
+        out_channles = out_channels * (upscale ** 2)
+        self.conv = nn.Conv2d(in_channels, out_channles, 1, bias=False)
+        self.bn = nn.BatchNorm2d(out_channles)
+        self.relu = nn.ReLU(inplace=True)
+        self.pixl_shf = nn.PixelShuffle(upscale_factor=upscale)
+        self.conv_w = nn.Conv2d(in_channels, out_channels * upscale * upscale, 1, bias=False)
+
+        initialize_weights(self)
+        kernel = self.icnr(self.conv.weight, scale=upscale)
+        self.conv.weight.data.copy_(kernel)
+
+    def forward(self, x):
+        # x = self.relu(self.bn(self.conv(x)))
+        x = self.conv_w(x)
+        x = self.pixl_shf(x)
+        return x
+
+    def icnr(self, x, scale=2, init=nn.init.kaiming_normal):
+        '''
+        Even with pixel shuffle we still have check board artifacts,
+        the solution is to initialize the d**2 feature maps with the same
+        radom weights: https://arxiv.org/pdf/1707.02937.pdf
+        '''
+        new_shape = [int(x.shape[0] / (scale ** 2))] + list(x.shape[1:])
+        subkernel = torch.zeros(new_shape)
+        subkernel = init(subkernel)
+        subkernel = subkernel.transpose(0, 1)
+        subkernel = subkernel.contiguous().view(subkernel.shape[0],
+                                                subkernel.shape[1], -1)
+        kernel = subkernel.repeat(1, 1, scale ** 2)
+        transposed_shape = [x.shape[1]] + [x.shape[0]] + list(x.shape[2:])
+        kernel = kernel.contiguous().view(transposed_shape)
+        kernel = kernel.transpose(0, 1)
+        return kernel
+
 class DUpsampling(nn.Module):
     """DUsampling module"""
 
@@ -140,7 +178,7 @@ class ResNet(nn.Module):
         x = self.layer0(x)
         x_13 = x
         x = self.layer1(x)
-        low_level_features = x
+        # low_level_features = x
         x = self.layer2(x)
         x_aux = self.layer3(x)
         x = self.layer4(x_aux)
@@ -150,6 +188,24 @@ class ResNet(nn.Module):
         # assert False
         return x, low_level_features, x_aux
 
+class SeparableConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, dilation=1, bias=False, padding=1,
+                 BatchNorm=nn.BatchNorm2d):
+        super(SeparableConv2d, self).__init__()
+
+        # if dilation > kernel_size // 2:
+        #     padding = dilation
+        # else:
+        #     padding = kernel_size // 2
+
+        self.conv1 = nn.Conv2d(in_channels, in_channels, kernel_size, stride, padding=padding,
+                               dilation=dilation, groups=in_channels, bias=bias)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, 1, 1, bias=bias)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.pointwise(x)
+        return x
 
 class PSPDUNet(BaseModel):
     def __init__(self, num_classes, in_channels=3, backbone='resnet50', pretrained=True, 
@@ -162,12 +218,8 @@ class PSPDUNet(BaseModel):
 
         self.backbone = ResNet(in_channels=in_channels, dilated=dilated, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
         self.psp_module = _PSPModule(m_out_sz, bin_sizes=bin_sizes, norm_layer=norm_layer)
-        self.conv = nn.Conv2d(m_out_sz // 4, 256, kernel_size=1)
-        self.dupsample = DUpsampling(256, num_classes, scale_factor=output_stride)
-
-        # self.dupsample = DUpsampling(m_out_sz//4, num_classes, scale_factor=output_stride)
-        # self.global_classifier = nn.Conv2d(m_out_sz//4, num_classes, kernel_size=1)
-
+        # self.dupsample = DUpsampling(m_out_sz // 4, num_classes, scale_factor=output_stride)
+        self.dupsample = DUC(m_out_sz // 4, num_classes, upscale=output_stride)
         self.auxiliary_branch = nn.Sequential(
             nn.Conv2d(m_out_sz//2, m_out_sz//4, kernel_size=3, padding=1, bias=False),
             norm_layer(m_out_sz//4),
@@ -188,8 +240,8 @@ class PSPDUNet(BaseModel):
 
     # 2. incorporate low level feautres and temp softmax
     # TODO - 3. lr schedulers 4. focal loss
-    # TODO - conv maps before upsample
-    # TODO - mash bilinear and dupsample together to keep global and fine grain together 
+    # TODO - multistep upsampling with transpose as well as the duc method
+    # TODO - HDC
 
     # TODO - training: ll feautres -> before pooling, after pooling
     # TODO - learn maps
@@ -199,11 +251,7 @@ class PSPDUNet(BaseModel):
         input_size = (x.size()[2], x.size()[3])
         x, low_level_features, x_aux = self.backbone(x)
         x = self.psp_module(x, low_level_features)
-        x = self.conv(x)
-        # print('x', x.size())
-
         output = self.dupsample(x)
-        # print('output', output.size())
         output = output[:, :, :input_size[0], :input_size[1]]
         output = output / self.T
 
