@@ -24,29 +24,30 @@ class SeparableConv2d(nn.Module):
 
 class DensePSPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, bin_sz,
-                 drop_rate=0.1, norm_layer=nn.BatchNorm2d):
+                 drop_rate=0.1, norm_layer=nn.BatchNorm2d, pool_layer=nn.AdaptiveAvgPool2d, up_mode='bilinear'):
         super(DensePSPConv, self).__init__()
-        self.add_module('aap', nn.AdaptiveAvgPool2d(output_size=bin_sz))
+        self.add_module('pool', pool_layer(output_size=bin_sz))
         self.add_module('conv', SeparableConv2d(in_channels, out_channels, 1))
         self.add_module('bn', norm_layer(out_channels))
         self.add_module('relu', nn.ReLU(True))
-        self.add_module('dropout', nn.Dropout2d(p=drop_rate))
+        self.add_module('dropout', nn.Dropout(p=drop_rate))
+        self.up_mode = up_mode
 
     def forward(self, x):
         h, w = x.size()[2], x.size()[3]
-        features = F.interpolate(super(DensePSPConv, self).forward(x), size=(h, w), mode='bilinear', align_corners=True)
+        features = F.interpolate(super(DensePSPConv, self).forward(x), size=(h, w), mode=self.up_mode, align_corners=True)
         return features
     
 class _DensePSPStage(nn.Module):
     def __init__(self, in_channels, inter_channels, out_channels, bin1, bin2,
-                 drop_rate=0.1, norm_layer=nn.BatchNorm2d, norm_kwargs=None):
+                 drop_rate=0.1, norm_layer=nn.BatchNorm2d, pool_layer=nn.AdaptiveAvgPool2d, up_mode='bilinear',
+                 norm_kwargs=None):
         super(_DensePSPStage, self).__init__()
         '''
         input -> binconv(bin1) -> cat(input, bin1) -> binconv(bin2) ->
         '''
-
         self.bin1 = DensePSPConv(in_channels, inter_channels, bin1, 
-                                 drop_rate=drop_rate, norm_layer=norm_layer)
+                                 drop_rate=drop_rate, norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode)
         self.bin2 = DensePSPConv(in_channels+inter_channels, out_channels, bin2,
                                  drop_rate=drop_rate, norm_layer=norm_layer)
     def forward(self, x):
@@ -57,15 +58,17 @@ class _DensePSPStage(nn.Module):
     
 class _DensePSPBin(nn.Module):
     def __init__(self, in_channels, inter_channels, out_channels, bins,
-                 drop_rate=0.1, norm_layer=nn.BatchNorm2d, norm_kwargs=None):
+                 drop_rate=0.1, norm_layer=nn.BatchNorm2d, pool_layer=nn.AdaptiveAvgPool2d, up_mode='bilinear',
+                 norm_kwargs=None):
         super(_DensePSPBin, self).__init__()
         assert len(bins) == 2
+        # print('bin pool', pool_layer)
         bin1 = bins[0]
         bin2 = bins[1]
-        self.stage1 = _DensePSPStage(in_channels, inter_channels, out_channels, 
-                                     bin1, bin2, drop_rate=drop_rate, norm_layer=norm_layer)
-        self.stage2 = _DensePSPStage(in_channels, inter_channels, out_channels, 
-                                     bin2, bin1, drop_rate=drop_rate, norm_layer=norm_layer)
+        self.stage_1_2 = _DensePSPStage(in_channels, inter_channels, out_channels, 
+                                     bin1, bin2, drop_rate=drop_rate, norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode)
+        self.stage_2_1 = _DensePSPStage(in_channels, inter_channels, out_channels, 
+                                     bin2, bin1, drop_rate=drop_rate, norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode)
 
     def forward(self, x):
         '''
@@ -73,31 +76,31 @@ class _DensePSPBin(nn.Module):
         Stage n+1, n -> out2
         out: cat(out1, out2)
         '''
-        out1 = self.stage1(x)
-        out2 = self.stage2(x)
+        out1 = self.stage_1_2(x)
+        out2 = self.stage_2_1(x)
         x = torch.cat((out1,out2),dim=1)
 
         return x
 
 # TODO - 16, 32, 64, 128 added maps
-# TODO - add dropout
 # TODO - check global vs maxp for agregated feat
 class _DensePSPModule(nn.Module):
-    def __init__(self, in_channels, bin_sizes, inter_channels, norm_layer):
+    def __init__(self, in_channels, bin_sizes, inter_channels, norm_layer=nn.BatchNorm2d, 
+                 pool_layer=nn.AdaptiveAvgPool2d, up_mode='bilinear'):
         super(_DensePSPModule, self).__init__()
         out_channels = in_channels // len(bin_sizes)
         assert bin_sizes == [1,2,3,6]
-
+        # print('module pool', pool_layer)
         bin1 = DensePSPConv(in_channels, out_channels, bin_sizes[0], norm_layer=norm_layer)
         bin23 = _DensePSPBin(in_channels, inter_channels, out_channels,
-                                  (bin_sizes[1],bin_sizes[2]), norm_layer=norm_layer)
+                                  (bin_sizes[1],bin_sizes[2]), norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode)
         bin6 = DensePSPConv(in_channels, out_channels, bin_sizes[3], norm_layer=norm_layer)
         self.stages = nn.ModuleList([bin1, bin23, bin6])
 
         self.bottleneck = nn.Sequential(
-            nn.Conv2d(in_channels+(out_channels * len(bin_sizes)), out_channels, 
+            nn.Conv2d(in_channels+(out_channels * len(bin_sizes)), 512, 
                                     kernel_size=3, padding=1, bias=False),
-            norm_layer(out_channels),
+            norm_layer(512),
             nn.ReLU(inplace=True),
             nn.Dropout2d(0.1)
         )
@@ -111,12 +114,13 @@ class _DensePSPModule(nn.Module):
 
 
 class DensePSP(BaseModel):
-    def __init__(self, num_classes, in_channels=3, backbone='resnet50', inter_channels=64,
-                  pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False,
-                 bin_sizes = [1,2,3,6]):
+    def __init__(self, num_classes, in_channels=3, backbone='resnet50', inter_channels=64, pool_layer='average',
+                  up_mode='bilinear', bin_sizes=[1,2,3,6], pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False):
         super(DensePSP, self).__init__()
         norm_layer = nn.BatchNorm2d
         # by default resolve to torchvision.models.resnet152(True, norm_layer) - this loads the prtrained weights in a depricated manner
+        assert pool_layer in ['average', 'max']
+        pool_layer = nn.AdaptiveAvgPool2d if pool_layer == 'average' else nn.AdaptiveMaxPool2d
         model = getattr(resnet, backbone)(pretrained, norm_layer=norm_layer)
         m_out_sz = model.fc.in_features
         self.use_aux = use_aux 
@@ -132,8 +136,8 @@ class DensePSP(BaseModel):
         self.layer4 = model.layer4
 
         self.master_branch = nn.Sequential(
-            _DensePSPModule(m_out_sz, bin_sizes, inter_channels, norm_layer=norm_layer),
-            nn.Conv2d(m_out_sz//len(bin_sizes), num_classes, kernel_size=1)
+            _DensePSPModule(m_out_sz, bin_sizes, inter_channels, norm_layer=norm_layer, pool_layer=pool_layer,up_mode=up_mode),
+            nn.Conv2d(512, num_classes, kernel_size=1)
         )
 
         self.auxiliary_branch = nn.Sequential(
