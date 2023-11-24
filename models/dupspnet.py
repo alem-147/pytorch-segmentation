@@ -132,7 +132,7 @@ class FeatureFused(nn.Module):
 -> ResNet BackBone
 '''
 class ResNet(nn.Module):
-    def __init__(self, in_channels=3, output_stride=16, backbone='resnet50', pretrained=True, dilated=True):
+    def __init__(self, in_channels=3, output_stride=16, backbone='resnet50', pretrained=True, dilated=True, hdc=False, hdc_dilation_bigger=False):
         super(ResNet, self).__init__()
         model = getattr(models, backbone)(pretrained)
         if not pretrained or in_channels != 3:
@@ -151,7 +151,35 @@ class ResNet(nn.Module):
         self.layer3 = model.layer3
         self.layer4 = model.layer4
 
-        if dilated:
+        if hdc:
+            d_res4b = []
+            if hdc_dilation_bigger:
+                d_res4b.extend([1, 2, 5, 9]*5 + [1, 2, 5])
+                d_res5b = [5, 9, 17]
+            else:
+                # Dialtion-RF
+                d_res4b.extend([1, 2, 3]*7 + [2, 2])
+                d_res5b = [3, 4, 5]
+
+            l_index = 0
+            for n, m in self.layer3.named_modules():
+                if 'conv2' in n:
+                    d = d_res4b[l_index]
+                    m.dilation, m.padding, m.stride = (d, d), (d, d), (1, 1)
+                    l_index += 1
+                elif 'downsample.0' in n:
+                    m.stride = (1, 1)
+
+            l_index = 0
+            for n, m in self.layer4.named_modules():
+                if 'conv2' in n:
+                    d = d_res5b[l_index]
+                    m.dilation, m.padding, m.stride = (d, d), (d, d), (1, 1)
+                    l_index += 1
+                elif 'downsample.0' in n:
+                    m.stride = (1, 1)    
+
+        elif dilated:
             if output_stride == 16:
                 s3, s4, d3, d4 = (2, 1, 1, 2)
             elif output_stride == 8:
@@ -209,14 +237,16 @@ class SeparableConv2d(nn.Module):
 
 class PSPDUNet(BaseModel):
     def __init__(self, num_classes, in_channels=3, backbone='resnet50', pretrained=True, 
-                 use_aux=True, dilated=False, output_stride=32, freeze_bn=False, temp_softmax=False, freeze_backbone=False, **kwargs):
+                 use_aux=True, dilated=False, output_stride=16, freeze_bn=False, temp_softmax=False, freeze_backbone=False,
+                 hdc=False, hdc_dilation_bigger=False, **kwargs):
         super(PSPDUNet, self).__init__()
         norm_layer = nn.BatchNorm2d
         self.use_aux = use_aux
         bin_sizes = [1, 2, 3, 6]
         m_out_sz = 2048
 
-        self.backbone = ResNet(in_channels=in_channels, dilated=dilated, output_stride=output_stride, pretrained=pretrained, backbone=backbone)
+        self.backbone = ResNet(in_channels=in_channels, dilated=dilated, output_stride=output_stride, 
+                               pretrained=pretrained, backbone=backbone, hdc=hdc, hdc_dilation_bigger=hdc_dilation_bigger)
         self.psp_module = _PSPModule(m_out_sz, bin_sizes=bin_sizes, norm_layer=norm_layer)
         # self.dupsample = DUpsampling(m_out_sz // 4, num_classes, scale_factor=output_stride)
         self.dupsample = DUC(m_out_sz // 4, num_classes, upscale=output_stride)
@@ -238,22 +268,19 @@ class PSPDUNet(BaseModel):
         if freeze_backbone: 
             set_trainable([self.initial, self.layer1, self.layer2, self.layer3, self.layer4], False)
 
-    # 2. incorporate low level feautres and temp softmax
     # TODO - 3. lr schedulers 4. focal loss
-    # TODO - multistep upsampling with transpose as well as the duc method
-    # TODO - HDC
 
     # TODO - training: ll feautres -> before pooling, after pooling
     # TODO - learn maps
     # TODO - mash
-    # 11-17_09-55 -> base implementation
     def forward(self, x):
         input_size = (x.size()[2], x.size()[3])
         x, low_level_features, x_aux = self.backbone(x)
         x = self.psp_module(x, low_level_features)
         output = self.dupsample(x)
         output = output[:, :, :input_size[0], :input_size[1]]
-        output = output / self.T
+        if self.training:
+            output = output / self.T
 
         if self.training and self.use_aux:
             aux = self.auxiliary_branch(x_aux)

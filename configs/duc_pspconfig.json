@@ -9,7 +9,8 @@
             "freeze_bn": false,
             "backbone": "resnet50",
             "use_aux": true,
-            "dilated": true
+            "dilated": true,
+            "output_stride": 16
         }
     },
 
@@ -47,7 +48,7 @@
         "type": "SGD",
         "differential_lr": true,
         "args":{
-            "lr": 0.07,
+            "lr": 0.01,
             "weight_decay": 1e-4,
             "momentum": 0.9
         }

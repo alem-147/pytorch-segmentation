@@ -1,8 +1,8 @@
 {
-  "name": "PSPDUNet - weight init",
+  "name": "PSPDUNet - hdc",
   "n_gpu": 1,
   "use_synch_bn": false,
-  "_comment": "use weight init tech to limit checkerboard",
+  "_comment": "add hdc to the resnet backbone",
     "arch": {
         "type": "PSPDUNet",
         "args": {
@@ -10,8 +10,9 @@
             "backbone": "resnet50",
             "use_aux": false,
             "temp_softmax": true,
-            "dilated": true,
-            "output_stride": 16
+            "hdc": true,
+            "hdc_dilation_bigger": false,
+            "output_stride": 8
         }
     },
 

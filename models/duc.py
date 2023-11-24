@@ -270,6 +270,7 @@ class PSPModule(nn.Module):
         output = self.bottleneck(torch.cat(pyramids, dim=1))
         return output
 
+# TODO - learning rate at 2.5e-4
 class PSP_DUC(BaseModel):
     def __init__(self, num_classes, in_channels=3, pretrained=True, output_stride=8, 
                  backbone='resnet50', freeze_bn=False, use_aux=False, dilated=True, **_):
