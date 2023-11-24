@@ -26,17 +26,15 @@ class DensePSPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, bin_sz,
                  drop_rate=0.1, norm_layer=nn.BatchNorm2d):
         super(DensePSPConv, self).__init__()
-        self.add_module('aap', nn.AdaptiveAvgPool2d(output_size=bin_sz)),
+        self.add_module('aap', nn.AdaptiveAvgPool2d(output_size=bin_sz))
         self.add_module('conv', SeparableConv2d(in_channels, out_channels, 1))
-        self.add_module('bn', norm_layer(out_channels)),
-        self.add_module('relu', nn.ReLU(True)),
-        self.drop_rate = drop_rate
+        self.add_module('bn', norm_layer(out_channels))
+        self.add_module('relu', nn.ReLU(True))
+        self.add_module('dropout', nn.Dropout2d(p=drop_rate))
 
     def forward(self, x):
         h, w = x.size()[2], x.size()[3]
         features = F.interpolate(super(DensePSPConv, self).forward(x), size=(h, w), mode='bilinear', align_corners=True)
-        if self.drop_rate > 0:
-            features = F.dropout(features, p=self.drop_rate, training=self.training)
         return features
     
 class _DensePSPStage(nn.Module):
@@ -80,19 +78,21 @@ class _DensePSPBin(nn.Module):
         x = torch.cat((out1,out2),dim=1)
 
         return x
-    
+
+# TODO - 16, 32, 64, 128 added maps
+# TODO - add dropout
+# TODO - check global vs maxp for agregated feat
 class _DensePSPModule(nn.Module):
     def __init__(self, in_channels, bin_sizes, inter_channels, norm_layer):
         super(_DensePSPModule, self).__init__()
         out_channels = in_channels // len(bin_sizes)
-        assert bin_sizes == [1,2,3,6,7]
+        assert bin_sizes == [1,2,3,6]
 
         bin1 = DensePSPConv(in_channels, out_channels, bin_sizes[0], norm_layer=norm_layer)
         bin23 = _DensePSPBin(in_channels, inter_channels, out_channels,
                                   (bin_sizes[1],bin_sizes[2]), norm_layer=norm_layer)
-        bin67 = _DensePSPBin(in_channels, inter_channels,out_channels,
-                                  (bin_sizes[3],bin_sizes[4]), norm_layer=norm_layer)
-        self.stages = nn.ModuleList([bin1,bin23,bin67])
+        bin6 = DensePSPConv(in_channels, out_channels, bin_sizes[3], norm_layer=norm_layer)
+        self.stages = nn.ModuleList([bin1, bin23, bin6])
 
         self.bottleneck = nn.Sequential(
             nn.Conv2d(in_channels+(out_channels * len(bin_sizes)), out_channels, 
@@ -112,7 +112,8 @@ class _DensePSPModule(nn.Module):
 
 class DensePSP(BaseModel):
     def __init__(self, num_classes, in_channels=3, backbone='resnet50', inter_channels=64,
-                  pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False):
+                  pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False,
+                 bin_sizes = [1,2,3,6]):
         super(DensePSP, self).__init__()
         norm_layer = nn.BatchNorm2d
         # by default resolve to torchvision.models.resnet152(True, norm_layer) - this loads the prtrained weights in a depricated manner
@@ -129,8 +130,6 @@ class DensePSP(BaseModel):
         self.layer2 = model.layer2
         self.layer3 = model.layer3
         self.layer4 = model.layer4
-
-        bin_sizes=[1, 2, 3, 6, 7]
 
         self.master_branch = nn.Sequential(
             _DensePSPModule(m_out_sz, bin_sizes, inter_channels, norm_layer=norm_layer),
@@ -172,106 +171,6 @@ class DensePSP(BaseModel):
     def get_backbone_params(self):
         return chain(self.initial.parameters(), self.layer1.parameters(), self.layer2.parameters(), 
                    self.layer3.parameters(), self.layer4.parameters())
-
-    def get_decoder_params(self):
-        return chain(self.master_branch.parameters(), self.auxiliary_branch.parameters())
-
-    def freeze_bn(self):
-        for module in self.modules():
-            if isinstance(module, nn.BatchNorm2d): module.eval()
-
-
-
-
-
-
-
-
-
-## PSP with dense net as the backbone
-
-class PSPDenseNet(BaseModel):
-    def __init__(self, num_classes, in_channels=3, backbone='densenet201', pretrained=True, use_aux=True, freeze_bn=False, **_):
-        super(PSPDenseNet, self).__init__()
-        self.use_aux = use_aux 
-        model = getattr(models, backbone)(pretrained)
-        m_out_sz = model.classifier.in_features
-        aux_out_sz = model.features.transition3.conv.out_channels
-
-        if not pretrained or in_channels != 3:
-            # If we're training from scratch, better to use 3x3 convs 
-            block0 = [nn.Conv2d(in_channels, 64, 3, stride=2, bias=False), nn.BatchNorm2d(64), nn.ReLU(inplace=True)]
-            block0.extend(
-                [nn.Conv2d(64, 64, 3, bias=False), nn.BatchNorm2d(64), nn.ReLU(inplace=True)] * 2
-            )
-            self.block0 = nn.Sequential(
-                *block0,
-                nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-            )
-            initialize_weights(self.block0)
-        else:
-            self.block0 = nn.Sequential(*list(model.features.children())[:4])
-        
-        self.block1 = model.features.denseblock1
-        self.block2 = model.features.denseblock2
-        self.block3 = model.features.denseblock3
-        self.block4 = model.features.denseblock4
-
-        self.transition1 = model.features.transition1
-        # No pooling
-        self.transition2 = nn.Sequential(
-            *list(model.features.transition2.children())[:-1])
-        self.transition3 = nn.Sequential(
-            *list(model.features.transition3.children())[:-1])
-
-        for n, m in self.block3.named_modules():
-            if 'conv2' in n:
-                m.dilation, m.padding = (2,2), (2,2)
-        for n, m in self.block4.named_modules():
-            if 'conv2' in n:
-                m.dilation, m.padding = (4,4), (4,4)
-
-        self.master_branch = nn.Sequential(
-            _PSPModule(m_out_sz, bin_sizes=[1, 2, 3, 6], norm_layer=nn.BatchNorm2d),
-            nn.Conv2d(m_out_sz//4, num_classes, kernel_size=1)
-        )
-
-        self.auxiliary_branch = nn.Sequential(
-            nn.Conv2d(aux_out_sz, m_out_sz//4, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(m_out_sz//4),
-            nn.ReLU(inplace=True),
-            nn.Dropout2d(0.1),
-            nn.Conv2d(m_out_sz//4, num_classes, kernel_size=1)
-        )
-
-        initialize_weights(self.master_branch, self.auxiliary_branch)
-        if freeze_bn: self.freeze_bn()
-
-    def forward(self, x):
-        input_size = (x.size()[2], x.size()[3])
-
-        x = self.block0(x)
-        x = self.block1(x)
-        x = self.transition1(x)
-        x = self.block2(x)
-        x = self.transition2(x)
-        x = self.block3(x)
-        x_aux = self.transition3(x)
-        x = self.block4(x_aux)
-
-        output = self.master_branch(x)
-        output = F.interpolate(output, size=input_size, mode='bilinear')
-
-        if self.training and self.use_aux:
-            aux = self.auxiliary_branch(x_aux)
-            aux = F.interpolate(aux, size=input_size, mode='bilinear')
-            return output, aux
-        return output
-
-    def get_backbone_params(self):
-        return chain(self.block0.parameters(), self.block1.parameters(), self.block2.parameters(), 
-                   self.block3.parameters(), self.transition1.parameters(), self.transition2.parameters(),
-                   self.transition3.parameters())
 
     def get_decoder_params(self):
         return chain(self.master_branch.parameters(), self.auxiliary_branch.parameters())
