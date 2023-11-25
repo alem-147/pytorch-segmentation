@@ -8,6 +8,96 @@ from base import BaseModel
 from utils.helpers import initialize_weights, set_trainable
 from itertools import chain
 
+
+''' 
+-> ResNet BackBone
+'''
+class ResNet(nn.Module):
+    def __init__(self, in_channels=3, output_stride=16, backbone='resnet50', pretrained=True, dilated=True, hdc=False, hdc_dilation_bigger=False):
+        super(ResNet, self).__init__()
+        model = getattr(models, backbone)(pretrained)
+        if not pretrained or in_channels != 3:
+            self.layer0 = nn.Sequential(
+                nn.Conv2d(in_channels, 64, 7, stride=2, padding=3, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+            )
+            initialize_weights(self.layer0)
+        else:
+            self.layer0 = nn.Sequential(*list(model.children())[:4])
+
+        self.layer1 = model.layer1
+        self.layer2 = model.layer2
+        self.layer3 = model.layer3
+        self.layer4 = model.layer4
+
+        if hdc:
+            d_res4b = []
+            if hdc_dilation_bigger:
+                d_res4b.extend([1, 2, 5, 9]*5 + [1, 2, 5])
+                d_res5b = [5, 9, 17]
+            else:
+                # Dialtion-RF
+                d_res4b.extend([1, 2, 3]*7 + [2, 2])
+                d_res5b = [3, 4, 5]
+
+            if output_stride == 8:
+                l_index = 0
+                for n, m in self.layer3.named_modules():
+                    if 'conv2' in n:
+                        d = d_res4b[l_index]
+                        m.dilation, m.padding, m.stride = (d, d), (d, d), (1, 1)
+                        l_index += 1
+                    elif 'downsample.0' in n:
+                        m.stride = (1, 1)
+
+            l_index = 0
+            for n, m in self.layer4.named_modules():
+                if 'conv2' in n:
+                    d = d_res5b[l_index]
+                    m.dilation, m.padding, m.stride = (d, d), (d, d), (1, 1)
+                    l_index += 1
+                elif 'downsample.0' in n:
+                    m.stride = (1, 1)
+
+        elif dilated:
+            if output_stride == 16:
+                s3, s4, d3, d4 = (2, 1, 1, 2)
+            elif output_stride == 8:
+                s3, s4, d3, d4 = (1, 1, 2, 4)
+
+            if output_stride == 8:
+                for n, m in self.layer3.named_modules():
+                    if 'conv1' in n and (backbone == 'resnet34' or backbone == 'resnet18'):
+                        m.dilation, m.padding, m.stride = (d3, d3), (d3, d3), (s3, s3)
+                    elif 'conv2' in n:
+                        m.dilation, m.padding, m.stride = (d3, d3), (d3, d3), (s3, s3)
+                    elif 'downsample.0' in n:
+                        m.stride = (s3, s3)
+
+            for n, m in self.layer4.named_modules():
+                if 'conv1' in n and (backbone == 'resnet34' or backbone == 'resnet18'):
+                    m.dilation, m.padding, m.stride = (d4, d4), (d4, d4), (s4, s4)
+                elif 'conv2' in n:
+                    m.dilation, m.padding, m.stride = (d4, d4), (d4, d4), (s4, s4)
+                elif 'downsample.0' in n:
+                    m.stride = (s4, s4)
+
+    def forward(self, x):
+        x = self.layer0(x)
+        x_13 = x
+        x = self.layer1(x)
+        # low_level_features = x
+        x = self.layer2(x)
+        x_aux = self.layer3(x)
+        x = self.layer4(x_aux)
+        #1024+64 features -> 1088 low level feauture
+        x_13 = F.interpolate(x_13, [x_aux.size()[2], x_aux.size()[3]], mode='bilinear', align_corners=True)
+        low_level_features = torch.cat((x_13, x_aux), dim=1)
+        # assert False
+        return x, low_level_features, x_aux
+
 class SeparableConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, dilation=1, padding=1, bias=False,
                  BatchNorm=nn.BatchNorm2d):
@@ -115,25 +205,27 @@ class _DensePSPModule(nn.Module):
 
 class DensePSP(BaseModel):
     def __init__(self, num_classes, in_channels=3, backbone='resnet50', inter_channels=64, pool_layer='average',
-                  up_mode='bilinear', bin_sizes=[1,2,3,6], pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False):
+                  up_mode='bilinear', bin_sizes=[1,2,3,6], pretrained=True, use_aux=True, freeze_bn=False,
+                 dilated=True, output_stride=16, hdc=False, hdc_dilation_bigger=False, freeze_backbone=False):
         super(DensePSP, self).__init__()
         norm_layer = nn.BatchNorm2d
-        # by default resolve to torchvision.models.resnet152(True, norm_layer) - this loads the prtrained weights in a depricated manner
         assert pool_layer in ['average', 'max']
+        self.backbone = ResNet(in_channels=in_channels, dilated=dilated, output_stride=output_stride,
+                               pretrained=pretrained, backbone=backbone, hdc=hdc, hdc_dilation_bigger=hdc_dilation_bigger)
         pool_layer = nn.AdaptiveAvgPool2d if pool_layer == 'average' else nn.AdaptiveMaxPool2d
         model = getattr(resnet, backbone)(pretrained, norm_layer=norm_layer)
         m_out_sz = model.fc.in_features
         self.use_aux = use_aux 
 
-        self.initial = nn.Sequential(*list(model.children())[:4])
-        if in_channels != 3:
-            self.initial[0] = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.initial = nn.Sequential(*self.initial)
-        
-        self.layer1 = model.layer1
-        self.layer2 = model.layer2
-        self.layer3 = model.layer3
-        self.layer4 = model.layer4
+        # self.initial = nn.Sequential(*list(model.children())[:4])
+        # if in_channels != 3:
+        #     self.initial[0] = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        # self.initial = nn.Sequential(*self.initial)
+        #
+        # self.layer1 = model.layer1
+        # self.layer2 = model.layer2
+        # self.layer3 = model.layer3
+        # self.layer4 = model.layer4
 
         self.master_branch = nn.Sequential(
             _DensePSPModule(m_out_sz, bin_sizes, inter_channels, norm_layer=norm_layer, pool_layer=pool_layer,up_mode=up_mode),
@@ -151,15 +243,11 @@ class DensePSP(BaseModel):
         initialize_weights(self.master_branch, self.auxiliary_branch)
         if freeze_bn: self.freeze_bn()
         if freeze_backbone: 
-            set_trainable([self.initial, self.layer1, self.layer2, self.layer3, self.layer4], False)
+            set_trainable([self.backbone], False)
 
     def forward(self, x):
         input_size = (x.size()[2], x.size()[3])
-        x = self.initial(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x_aux = self.layer3(x)
-        x = self.layer4(x_aux)
+        x, low_level_features, x_aux = self.backbone(x)
 
         output = self.master_branch(x)
         output = F.interpolate(output, size=input_size, mode='bilinear')
@@ -173,8 +261,7 @@ class DensePSP(BaseModel):
         return output
 
     def get_backbone_params(self):
-        return chain(self.initial.parameters(), self.layer1.parameters(), self.layer2.parameters(), 
-                   self.layer3.parameters(), self.layer4.parameters())
+        return chain(self.backbone.parameters())
 
     def get_decoder_params(self):
         return chain(self.master_branch.parameters(), self.auxiliary_branch.parameters())
