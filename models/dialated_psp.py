@@ -168,6 +168,7 @@ class DeepPSP(BaseModel):
         output = self.master_branch(x)
         output = F.interpolate(output, size=input_size, mode='bilinear')
         output = output[:, :, :input_size[0], :input_size[1]]
+        output = output / self.T
 
         if self.training and self.use_aux:
             aux = self.auxiliary_branch(x_aux)

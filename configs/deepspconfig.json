@@ -1,19 +1,20 @@
 {
-    "name": "DeepPSP - dilated",
+    "name": "DeepPSP - maxhdc",
     "n_gpu": 1,
     "use_synch_bn": false,
-    "_comment": "dilate original psp head",
+    "_comment": "output stride of 8 with hdc bigger",
   
       "arch": {
           "type": "DeepPSP",
           "args": {
             "freeze_bn": false,
             "backbone": "resnet50",
-            "use_aux": false,
+            "use_aux": true,
             "temp_softmax": false,
-            "hdc": false,
-            "dilated": true,
-            "output_stride": 16
+            "hdc": true,
+            "dilated": false,
+            "output_stride": 8,
+            "hdc_dilation_bigger": true
         }
       },
   
