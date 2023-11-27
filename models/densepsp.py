@@ -156,25 +156,25 @@ class _DensePSPStage(nn.Module):
         x = self.conv(x)
         x = F.interpolate(x, size=(h, w), mode='bilinear', align_corners=True)
         return x
-    
 
-# TODO - 16, 32, 64, 128 added maps
-# TODO - check global vs maxp for agregated feat
 class _DensePSPModule(nn.Module):
     def __init__(self, in_channels, bin_sizes, norm_layer=nn.BatchNorm2d,
                  pool_layer=nn.AdaptiveMaxPool2d, up_mode='bilinear', bin_increase=1):
         super(_DensePSPModule, self).__init__()
         out_channels = in_channels // len(bin_sizes)
-        assert bin_sizes == [1,2,3,6]
         bin1 = DensePSPConv(in_channels, out_channels, bin_sizes[0], norm_layer=norm_layer)
-        bin2 = _DensePSPStage(in_channels, out_channels, bin_sizes[1],
-                              norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
-        bin3 = _DensePSPStage(in_channels, out_channels, bin_sizes[2],
-                              norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
-        bin6 = _DensePSPStage(in_channels, out_channels, bin_sizes[3],
-                              norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
-        self.stages = nn.ModuleList([bin1, bin2, bin3, bin6])
+        # bin2 = _DensePSPStage(in_channels, out_channels, bin_sizes[1],
+        #                       norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
+        # bin3 = _DensePSPStage(in_channels, out_channels, bin_sizes[2],
+        #                       norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
+        # bin6 = _DensePSPStage(in_channels, out_channels, bin_sizes[3],
+        #                       norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
+        # self.stages = nn.ModuleList([bin1, bin2, bin3, bin6])
 
+        self.stages = nn.ModuleList([ _DensePSPStage(in_channels, out_channels, b_s,
+                              norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
+                                      for b_s in bin_sizes[1:]])
+        self.stages.insert(0, bin1)
         self.bottleneck = nn.Sequential(
             nn.Conv2d(in_channels+(out_channels * len(bin_sizes)), 512, 
                                     kernel_size=3, padding=1, bias=False),
@@ -224,6 +224,7 @@ class DensePSP(BaseModel):
         if freeze_backbone: 
             set_trainable([self.backbone], False)
 
+    # for dil 8, input size is 380
     def forward(self, x):
         input_size = (x.size()[2], x.size()[3])
         x, low_level_features, x_aux = self.backbone(x)

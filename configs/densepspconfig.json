@@ -1,8 +1,8 @@
 {
-  "name": "DensePSP - new structure",
+  "name": "DensePSP - new max dilation",
   "n_gpu": 1,
   "use_synch_bn": false,
-  "_comment": "bin 1 (2,3) (3,4) (6,7) - bilinear for first pool, no relu, normal conv",
+  "_comment": "bin 1 (2,3) (3,4) (6,7) - nearest for first pool",
 
     "arch": {
         "type": "DensePSP",
@@ -11,11 +11,11 @@
             "freeze_bn": false,
             "freeze_backbone": false,
             "use_aux": true,
-            "bin_sizes": [1,2,3,6],
+            "bin_sizes": [1,2,3,6,12],
             "pool_layer": "max",
-            "up_mode": "bilinear",
+            "up_mode": "nearest",
             "dilated": true,
-            "output_stride": 16,
+            "output_stride": 8,
             "hdc": false
         }
     },
