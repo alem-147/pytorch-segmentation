@@ -95,7 +95,6 @@ class ResNet(nn.Module):
         #1024+64 features -> 1088 low level feauture
         x_13 = F.interpolate(x_13, [x_aux.size()[2], x_aux.size()[3]], mode='bilinear', align_corners=True)
         low_level_features = torch.cat((x_13, x_aux), dim=1)
-        # assert False
         return x, low_level_features, x_aux
 
 class SeparableConv2d(nn.Module):
@@ -162,14 +161,7 @@ class _DensePSPModule(nn.Module):
                  pool_layer=nn.AdaptiveMaxPool2d, up_mode='bilinear', bin_increase=1):
         super(_DensePSPModule, self).__init__()
         out_channels = in_channels // len(bin_sizes)
-        bin1 = DensePSPConv(in_channels, out_channels, bin_sizes[0], norm_layer=norm_layer)
-        # bin2 = _DensePSPStage(in_channels, out_channels, bin_sizes[1],
-        #                       norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
-        # bin3 = _DensePSPStage(in_channels, out_channels, bin_sizes[2],
-        #                       norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
-        # bin6 = _DensePSPStage(in_channels, out_channels, bin_sizes[3],
-        #                       norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
-        # self.stages = nn.ModuleList([bin1, bin2, bin3, bin6])
+        bin1 = DensePSPConv(in_channels, out_channels, bin_sizes[0], norm_layer=norm_layer, pool_layer=nn.AdaptiveAvgPool2d)
 
         self.stages = nn.ModuleList([ _DensePSPStage(in_channels, out_channels, b_s,
                               norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode, bin_increase=bin_increase)
@@ -224,19 +216,16 @@ class DensePSP(BaseModel):
         if freeze_backbone: 
             set_trainable([self.backbone], False)
 
-    # for dil 8, input size is 380
     def forward(self, x):
         input_size = (x.size()[2], x.size()[3])
         x, low_level_features, x_aux = self.backbone(x)
 
         output = self.master_branch(x)
         output = F.interpolate(output, size=input_size, mode='bilinear')
-        # output = output[:, :, :input_size[0], :input_size[1]]
 
         if self.training and self.use_aux:
             aux = self.auxiliary_branch(x_aux)
             aux = F.interpolate(aux, size=input_size, mode='bilinear')
-            # aux = aux[:, :, :input_size[0], :input_size[1]]
             return output, aux
         return output
 
