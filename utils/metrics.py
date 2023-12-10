@@ -45,16 +45,19 @@ def batch_pix_accuracy(predict, target, labeled):
     assert pixel_correct <= pixel_labeled, "Correct area should be smaller than Labeled"
     return pixel_correct.cpu().numpy(), pixel_labeled.cpu().numpy()
 
-def batch_intersection_union(predict, target, num_class, labeled):
+def batch_intersection_union_mask(predict, target, num_class, labeled):
     predict = predict * labeled.long()
     intersection = predict * (predict == target).long()
 
     area_inter = torch.histc(intersection.float(), bins=num_class, max=num_class, min=1)
     area_pred = torch.histc(predict.float(), bins=num_class, max=num_class, min=1)
     area_lab = torch.histc(target.float(), bins=num_class, max=num_class, min=1)
-    area_union = area_pred + area_lab - area_inter
+    mask_sum = area_pred + area_lab
+    area_union = mask_sum - area_inter
     assert (area_inter <= area_union).all(), "Intersection area should be smaller than Union area"
-    return area_inter.cpu().numpy(), area_union.cpu().numpy()
+    return area_inter.cpu().numpy(), area_union.cpu().numpy(), mask_sum.cpu().numpy()
+
+
 
 def eval_metrics(output, target, num_class):
     _, predict = torch.max(output.data, 1)
@@ -63,5 +66,6 @@ def eval_metrics(output, target, num_class):
 
     labeled = (target > 0) * (target <= num_class)
     correct, num_labeled = batch_pix_accuracy(predict, target, labeled)
-    inter, union = batch_intersection_union(predict, target, num_class, labeled)
-    return [np.round(correct, 5), np.round(num_labeled, 5), np.round(inter, 5), np.round(union, 5)]
+    inter, union, mask_sum = batch_intersection_union_mask(predict, target, num_class, labeled)
+    return [np.round(correct, 5), np.round(num_labeled, 5), np.round(inter, 5),
+            np.round(union, 5), np.round(mask_sum, 5)]
