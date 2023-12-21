@@ -87,14 +87,20 @@ class ResNet(nn.Module):
     def forward(self, x):
         x = self.layer0(x)
         x_13 = x
+        # print('x_13',x_13.size())
         x = self.layer1(x)
         # low_level_features = x
+        # print('layer_1', x.size())
         x = self.layer2(x)
+        low_level_features = x
+        # print('x_24', x.size())
         x_aux = self.layer3(x)
+        # print('x_aux',x_aux.size())
         x = self.layer4(x_aux)
         #1024+64 features -> 1088 low level feauture
-        x_13 = F.interpolate(x_13, [x_aux.size()[2], x_aux.size()[3]], mode='bilinear', align_corners=True)
-        low_level_features = torch.cat((x_13, x_aux), dim=1)
+        # x_13 = F.interpolate(x_13, [x_aux.size()[2], x_aux.size()[3]], mode='bilinear', align_corners=True)
+        # low_level_features = torch.cat((x_13, x_aux), dim=1)
+        # print('backbone',x.size())
         return x, low_level_features, x_aux
 
 class SeparableConv2d(nn.Module):
@@ -110,6 +116,23 @@ class SeparableConv2d(nn.Module):
         x = self.conv1(x)
         x = self.pointwise(x)
         return x
+
+class FeatureFused(nn.Module):
+    """Module for fused features"""
+
+    def __init__(self, high_level_channels, inter_channels=512, norm_layer=nn.BatchNorm2d, **kwargs):
+        super(FeatureFused, self).__init__()
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(high_level_channels, inter_channels, 1, bias=False),
+            norm_layer(inter_channels),
+            nn.ReLU(True)
+        )
+
+    def forward(self, x, low_level_features):
+        size = low_level_features.size()[2:]
+        x = self.conv2(F.interpolate(x, size, mode='bilinear', align_corners=True))
+        fused_feature = torch.cat([x, low_level_features], dim=1)
+        return fused_feature
 
 class DensePSPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, bin_sz,
@@ -200,8 +223,16 @@ class DensePSP(BaseModel):
 
         self.master_branch = nn.Sequential(
             _DensePSPModule(m_out_sz, bin_sizes, norm_layer=norm_layer, pool_layer=pool_layer,up_mode=up_mode),
-            nn.Conv2d(512, num_classes, kernel_size=1)
+            nn.Conv2d(512, 256, kernel_size=1)
         )
+
+        self.ll_handler = nn.Sequential(
+            nn.Conv2d(512,64,kernel_size=1),
+            norm_layer(64),
+            nn.ReLU(True))
+
+        self.decoder = nn.Sequential(
+            nn.Conv2d(320, num_classes, kernel_size=1))
 
         self.auxiliary_branch = nn.Sequential(
             nn.Conv2d(m_out_sz//2, m_out_sz//4, kernel_size=3, padding=1, bias=False),
@@ -216,16 +247,22 @@ class DensePSP(BaseModel):
         if freeze_backbone: 
             set_trainable([self.backbone], False)
 
+    # for dil 8, input size is 380
     def forward(self, x):
         input_size = (x.size()[2], x.size()[3])
         x, low_level_features, x_aux = self.backbone(x)
-
+        low_level_features = self.ll_handler(low_level_features)
+        ll_size = (low_level_features.size()[2], low_level_features.size()[3])
         output = self.master_branch(x)
+        output = F.interpolate(output, size=ll_size, mode='bilinear')
+        output = self.decoder(torch.cat((output,low_level_features),dim=1))
         output = F.interpolate(output, size=input_size, mode='bilinear')
+        # output = output[:, :, :input_size[0], :input_size[1]]
 
         if self.training and self.use_aux:
             aux = self.auxiliary_branch(x_aux)
             aux = F.interpolate(aux, size=input_size, mode='bilinear')
+            # aux = aux[:, :, :input_size[0], :input_size[1]]
             return output, aux
         return output
 
