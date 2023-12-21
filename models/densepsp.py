@@ -227,12 +227,12 @@ class DensePSP(BaseModel):
         )
 
         self.ll_handler = nn.Sequential(
-            nn.Conv2d(512,64,kernel_size=1),
-            norm_layer(64),
+            nn.Conv2d(512,inter_channels,kernel_size=1),
+            norm_layer(inter_channels),
             nn.ReLU(True))
 
         self.decoder = nn.Sequential(
-            nn.Conv2d(320, num_classes, kernel_size=1))
+            nn.Conv2d(256+inter_channels, num_classes, kernel_size=1))
 
         self.auxiliary_branch = nn.Sequential(
             nn.Conv2d(m_out_sz//2, m_out_sz//4, kernel_size=3, padding=1, bias=False),
