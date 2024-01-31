@@ -1,8 +1,8 @@
 {
-  "name": "DensePSP - decoder 32",
+  "name": "DensePSP - decoder no aux",
   "n_gpu": 1,
   "use_synch_bn": false,
-  "_comment": "32 inter maps",
+  "_comment": "check if aux is still relevant",
 
     "arch": {
         "type": "DensePSP",
@@ -10,13 +10,13 @@
             "backbone": "resnet50",
             "freeze_bn": false,
             "freeze_backbone": false,
-            "use_aux": true,
+            "use_aux": false,
             "bin_sizes": [1,2,6,12],
             "pool_layer": "max",
             "up_mode": "nearest",
             "dilated": true,
             "output_stride": 16,
-            "inter_channels": 32,
+            "inter_channels": 64,
             "hdc": false
         }
     },

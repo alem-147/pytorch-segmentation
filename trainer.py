@@ -54,8 +54,11 @@ class Trainer(BaseTrainer):
             # LOSS & OPTIMIZE
             self.optimizer.zero_grad()
             output = self.model(data)
-            if (self.config['arch']['type'][:3] == 'PSP' or self.config['arch']['type'][::-1][:3] == 'PSP')\
+            if (self.config['arch']['type'][:3] == 'PSP'
+                or self.config['arch']['type'][::-1][:3] == 'PSP'
+                or self.config['arch']['type'][:5] == 'Swift')\
                     and self.config['arch']['args']['use_aux']:
+                # print('hiiiii')
                 # self.logger.warning(f"model out {output[0].size()[2:]}")
                 # self.logger.warning(f"target {target.size()[1:]}")
                 
@@ -65,6 +68,7 @@ class Trainer(BaseTrainer):
                 loss += self.loss(output[1], target) * 0.4
                 output = output[0]
             else:
+                # print(self.config['arch']['type'][:5])
                 # self.logger.warning(f"model out {output.size()[2:]}")
                 # self.logger.warning(f"target {target.size()[1:]}")
                 assert output.size()[2:] == target.size()[1:]

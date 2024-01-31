@@ -1,41 +1,43 @@
 {
-  "name": "deeplabv3+",
-  "n_gpu": 1,
-  "use_synch_bn": true,
+    "name": "SwiftNet-SingleScale-base",
+    "n_gpu": 1,
+    "use_synch_bn": false,
 
     "arch": {
-        "type": "DeepLab",
+        "type": "SwiftNetSingleScale",
         "args": {
-            "backbone": "resnet",
-            "output_stride": 8,
+            "layers": [2,2,2,2],
+            "num_features": 128,
+            "use_aux": false,
             "freeze_bn": false,
             "freeze_backbone": false
         }
     },
 
     "train_loader": {
-        "type": "VOC",
+        "type": "CityScapes",
         "args":{
-            "data_dir": "data/VOCtrainval_11-May-2012",
-            "batch_size": 12,
+            "data_dir": "./data/CityScapes",
+            "mode": "fine",
+            "batch_size": 8,
+            "base_size": 768,
+            "crop_size": 768,
             "augment": true,
-            "crop_size": 380,
             "shuffle": true,
-            "base_size": 400,
             "scale": true,
             "flip": true,
-            "rotate": true,
-            "blur": true,
-            "split": "train_aug",
+            "rotate": false,
+            "blur": false,
+            "split": "train",
             "num_workers": 8
         }
     },
 
     "val_loader": {
-        "type": "VOC",
+        "type": "CityScapes",
         "args":{
-            "data_dir": "data/VOCtrainval_11-May-2012",
-            "batch_size": 4,
+            "data_dir": "./data/CityScapes",
+            "batch_size": 8,
             "crop_size": 480,
             "val": true,
             "split": "val",
@@ -45,10 +47,9 @@
 
     "optimizer": {
         "type": "Adam",
-        "differential_lr":  true,
+        "differential_lr": true,
         "args":{
-            "amsgrad": true,
-            "lr": 1e-3,
+            "lr": 4e-4,
             "weight_decay": 1e-4
         }
     },
@@ -56,12 +57,12 @@
     "loss": "CrossEntropyLoss2d",
     "ignore_index": 255,
     "lr_scheduler": {
-        "type": "Poly",
+        "type": "OneCycle",
         "args": {}
     },
 
     "trainer": {
-        "epochs": 40,
+        "epochs": 200,
         "save_dir": "saved/",
         "save_period": 10,
 
