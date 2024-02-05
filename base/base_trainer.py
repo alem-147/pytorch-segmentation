@@ -45,15 +45,24 @@ class BaseTrainer:
         self.save_period = cfg_trainer['save_period']
 
         # OPTIMIZER
+        optm_cfg = self.config['optimizer']['differential_lr']
         if self.config['optimizer']['differential_lr']:
+            decay_scale = 10 if type(optm_cfg) == bool else optm_cfg['decay_scale']
+            lr_scale = 10 if type(optm_cfg) == bool else optm_cfg['lr_scale']
+
+            # decay_scale = 10 if optm_cfg['decay_scale'] == None else optm_cfg['decay_scale']
+            # lr_scale = 10 if optm_cfg['lr_scale'] == None else optm_cfg['lr_scale']
+            print('LR scale', lr_scale)
             if isinstance(self.model, torch.nn.DataParallel):
                 trainable_params = [{'params': filter(lambda p:p.requires_grad, self.model.module.get_decoder_params())},
                                     {'params': filter(lambda p:p.requires_grad, self.model.module.get_backbone_params()), 
-                                    'lr': config['optimizer']['args']['lr'] / 10}]
+                                    'lr': config['optimizer']['args']['lr'] / lr_scale,
+                                     'weight_decay': config['optimizer']['args']['lr'] / decay_scale}]
             else:
                 trainable_params = [{'params': filter(lambda p:p.requires_grad, self.model.get_decoder_params())},
-                                    {'params': filter(lambda p:p.requires_grad, self.model.get_backbone_params()), 
-                                    'lr': config['optimizer']['args']['lr'] / 10}]
+                                    {'params': filter(lambda p: p.requires_grad, self.model.module.get_backbone_params()),
+                                     'lr': config['optimizer']['args']['lr'] / lr_scale,
+                                     'weight_decay': config['optimizer']['args']['lr'] / decay_scale}]
         else:
             trainable_params = filter(lambda p:p.requires_grad, self.model.parameters())
         self.optimizer = get_instance(torch.optim, 'optimizer', config, trainable_params)

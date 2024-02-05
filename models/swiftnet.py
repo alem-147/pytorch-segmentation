@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 
-# from models import resnet
+from models import resnet
 # from torchvision import models
 from base import BaseModel
 from utils.helpers import initialize_weights, set_trainable
@@ -65,31 +65,31 @@ class BasicBlock(nn.Module):
         return relu, out
 
 class SwiftNetSingleScale(BaseModel):
-    def __init__(self, num_classes, block=BasicBlock, num_features=128, layers=[2,2,2,2], k_up=3, efficient=True, use_bn=True,
-                 spp_grids=(8, 4, 2, 1), spp_square_grid=False, use_aux=True, freeze_bn=False, freeze_backbone=False):
+    def __init__(self, num_classes, backbone='resnet18', num_features=128, k_up=3, use_bn=True,
+                 spp_grids=(8, 4, 2, 1), spp_square_grid=False, pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False):
         super(SwiftNetSingleScale, self).__init__()
         self.inplanes = 64
         self.use_aux = use_aux
-        self.efficient = efficient
-        self.nclass = num_classes
         self.use_bn = use_bn
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
-                               bias=False)
-        self.bn1 = nn.BatchNorm2d(64) if self.use_bn else lambda x: x
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        upsamples = []
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        upsamples += [_Upsample(num_features, self.inplanes, num_features, use_bn=self.use_bn, k=k_up)]
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-        upsamples += [_Upsample(num_features, self.inplanes, num_features, use_bn=self.use_bn, k=k_up)]
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
-        upsamples += [_Upsample(num_features, self.inplanes, num_features, use_bn=self.use_bn, k=k_up)]
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
 
-        self.fine_tune = [self.conv1, self.maxpool, self.layer1, self.layer2, self.layer3, self.layer4]
-        if self.use_bn:
-            self.fine_tune += [self.bn1]
+        model = getattr(resnet, backbone)(pretrained, prerelres=True, norm_layer=nn.BatchNorm2d if use_bn else None)
+        self.use_aux = use_aux
+
+        # don't do deep base until you set the planes right
+        self.initial = nn.Sequential(*list(model.children())[:4])
+
+        upsamples = []
+        self.layer1, self.inplanes = model.layer1, 64
+        upsamples += [_Upsample(num_features, self.inplanes, num_features, use_bn=self.use_bn, k=k_up)]
+        self.layer2, self.inplanes = model.layer2, 128
+        upsamples += [_Upsample(num_features, self.inplanes, num_features, use_bn=self.use_bn, k=k_up)]
+        self.layer3, self.inplanes = model.layer3, 256
+        upsamples += [_Upsample(num_features, self.inplanes, num_features, use_bn=self.use_bn, k=k_up)]
+        self.layer4, self.inplanes = model.layer4, 512
+
+        # self.fine_tune = [self.conv1, self.maxpool, self.layer1, self.layer2, self.layer3, self.layer4]
+        # if self.use_bn:
+        #     self.fine_tune += [self.bn1]
 
         num_levels = 3
         self.spp_size = num_features
@@ -97,8 +97,7 @@ class SwiftNetSingleScale(BaseModel):
 
         level_size = self.spp_size // num_levels
 
-        self.dsn = dsn(256, self.nclass)
-
+        self.dsn = dsn(256, num_classes)
         self.spp = SpatialPyramidPooling(self.inplanes, num_levels, bt_size=bt_size, level_size=level_size,
                                          out_size=self.spp_size, grids=spp_grids, square_grid=spp_square_grid,
                                          bn_momentum=0.01 / 2, use_bn=self.use_bn)
@@ -107,10 +106,13 @@ class SwiftNetSingleScale(BaseModel):
         self.logits = nn.Sequential(nn.BatchNorm2d(num_features) if self.use_bn else None,
                                     nn.ReLU(inplace=self.use_bn),
                                     nn.Conv2d(num_features, num_classes, kernel_size=1))
-        self.random_init = [self.spp, self.upsample]
+
+        # self.random_init = [self.spp, self.upsample]
 
         self.num_features = num_classes
 
+        # may need to modify where this does this bc resnet is pretrained
+        print(self.modules())
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -122,34 +124,17 @@ class SwiftNetSingleScale(BaseModel):
         if freeze_backbone:
             set_trainable([self.backbone], False)
 
-    def _make_layer(self, block, planes, blocks, stride=1):
-        downsample = None
-        if stride != 1 or self.inplanes != planes * block.expansion:
-            layers = [nn.Conv2d(self.inplanes, planes * block.expansion, kernel_size=1, stride=stride, bias=False)]
-            if self.use_bn:
-                layers += [nn.BatchNorm2d(planes * block.expansion)]
-            downsample = nn.Sequential(*layers)
-        layers = [block(self.inplanes, planes, stride, downsample, efficient=self.efficient, use_bn=self.use_bn)]
-        self.inplanes = planes * block.expansion
-        for i in range(1, blocks):
-            layers += [block(self.inplanes, planes, efficient=self.efficient, use_bn=self.use_bn)]
-
-        return nn.Sequential(*layers)
-
-
     def forward_resblock(self, x, layers):
         skip = None
         for l in layers:
+
             x = l(x)
             if isinstance(x, tuple):
                 x, skip = x
         return x, skip
 
     def forward_down(self, image):
-        x = self.conv1(image)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
+        x = self.initial(image)
         features = []
         x, skip = self.forward_resblock(x, self.layer1)
         features += [skip]
@@ -200,10 +185,9 @@ class SwiftNetSingleScale(BaseModel):
 
     def get_backbone_params(self):
         return chain(self.layer1.parameters(), self.layer2.parameters(), self.layer3.parameters(),
-                   self.layer4.parameters(), self.dsn.parameters(), self.conv1.parameters(), self.bn1.parameters(),
-                     self.relu.parameters(), self.maxpool.parameters(), self.spp.parameters())
+                   self.layer4.parameters(), self.initial.parameters())
     def get_decoder_params(self):
-        return chain(self.upsample.parameters())
+        return chain(self.spp.parameters(),self.upsample.parameters())
 
     def freeze_bn(self):
         for module in self.modules():
@@ -269,7 +253,7 @@ class _BNReluConv(nn.Sequential):
 class _Upsample(nn.Module):
     def __init__(self, num_maps_in, skip_maps_in, num_maps_out, use_bn=True, k=3):
         super(_Upsample, self).__init__()
-        print(f'Upsample layer: in = {num_maps_in}, skip = {skip_maps_in}, out = {num_maps_out}')
+        # print(f'Upsample layer: in = {num_maps_in}, skip = {skip_maps_in}, out = {num_maps_out}')
         self.bottleneck = _BNReluConv(skip_maps_in, num_maps_in, k=1, batch_norm=use_bn)
         self.blend_conv = _BNReluConv(num_maps_in, num_maps_out, k=k, batch_norm=use_bn)
 

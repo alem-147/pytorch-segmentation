@@ -17,3 +17,4 @@ from .duc import DeepLab_DUC, PSP_DUC
 from .dunet import DUNet
 from .dupspnet import PSPDUNet
 from .swiftnet import SwiftNetSingleScale, SwiftNetPyramid
+from .swiftnet_plus import SwiftNetSingleScale_plus

@@ -41,7 +41,7 @@ class BasicBlock(nn.Module):
     """
     expansion = 1
     def __init__(self, inplanes, planes, stride=1, dilation=1, downsample=None, previous_dilation=1,
-                 norm_layer=None):
+                 norm_layer=None, prerelres=False):
         super(BasicBlock, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=3, stride=stride,
                                padding=dilation, dilation=dilation, bias=False)
@@ -52,7 +52,7 @@ class BasicBlock(nn.Module):
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
-
+        self.prerelres = prerelres
     def forward(self, x):
         residual = x
 
@@ -67,9 +67,13 @@ class BasicBlock(nn.Module):
             residual = self.downsample(x)
 
         out += residual
-        out = self.relu(out)
+        relu = self.relu(out)
 
-        return out
+        # prerelres for swiftnet
+        if not self.prerelres:
+            return relu
+        else:
+            return relu, out
 
 
 class Bottleneck(nn.Module):
@@ -78,7 +82,7 @@ class Bottleneck(nn.Module):
     # pylint: disable=unused-argument
     expansion = 4
     def __init__(self, inplanes, planes, stride=1, dilation=1,
-                 downsample=None, previous_dilation=1, norm_layer=None):
+                 downsample=None, previous_dilation=1, norm_layer=None, prerelres=False):
         super(Bottleneck, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn1 = norm_layer(planes)
@@ -133,7 +137,7 @@ class ResNet(nn.Module):
     """
     # pylint: disable=unused-variable
     def __init__(self, block, layers, num_classes=1000, dilated=False, multi_grid=False,
-                 deep_base=True, norm_layer=nn.BatchNorm2d):
+                 deep_base=True, norm_layer=nn.BatchNorm2d, prerelres=False):
         self.inplanes = 128 if deep_base else 64
         super(ResNet, self).__init__()
         if deep_base:
@@ -152,23 +156,23 @@ class ResNet(nn.Module):
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0], norm_layer=norm_layer)
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, norm_layer=norm_layer)
+        self.layer1 = self._make_layer(block, 64, layers[0], norm_layer=norm_layer, prerelres=prerelres)
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, norm_layer=norm_layer, prerelres=prerelres)
         if dilated:
             self.layer3 = self._make_layer(block, 256, layers[2], stride=1,
-                                           dilation=2, norm_layer=norm_layer)
+                                           dilation=2, norm_layer=norm_layer, prerelres=prerelres)
             if multi_grid:
                 self.layer4 = self._make_layer(block, 512, layers[3], stride=1,
                                                dilation=4, norm_layer=norm_layer,
-                                               multi_grid=True)
+                                               multi_grid=True, prerelres=prerelres)
             else:
                 self.layer4 = self._make_layer(block, 512, layers[3], stride=1,
-                                               dilation=4, norm_layer=norm_layer)
+                                               dilation=4, norm_layer=norm_layer, prerelres=prerelres)
         else:
             self.layer3 = self._make_layer(block, 256, layers[2], stride=2,
-                                           norm_layer=norm_layer)
+                                           norm_layer=norm_layer, prerelres=prerelres)
             self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
-                                           norm_layer=norm_layer)
+                                           norm_layer=norm_layer, prerelres=prerelres)
         self.avgpool = nn.AvgPool2d(7, stride=1)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
@@ -180,7 +184,7 @@ class ResNet(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
-    def _make_layer(self, block, planes, blocks, stride=1, dilation=1, norm_layer=None, multi_grid=False):
+    def _make_layer(self, block, planes, blocks, stride=1, dilation=1, norm_layer=None, multi_grid=False, prerelres=False):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -193,13 +197,13 @@ class ResNet(nn.Module):
         multi_dilations = [4, 8, 16]
         if multi_grid:
             layers.append(block(self.inplanes, planes, stride, dilation=multi_dilations[0],
-                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer))
+                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer, prerelres=prerelres))
         elif dilation == 1 or dilation == 2:
             layers.append(block(self.inplanes, planes, stride, dilation=1,
-                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer))
+                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer, prerelres=prerelres))
         elif dilation == 4:
             layers.append(block(self.inplanes, planes, stride, dilation=2,
-                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer))
+                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer, prerelres=prerelres))
         else:
             raise RuntimeError("=> unknown dilation size: {}".format(dilation))
 
@@ -207,10 +211,10 @@ class ResNet(nn.Module):
         for i in range(1, blocks):
             if multi_grid:
                 layers.append(block(self.inplanes, planes, dilation=multi_dilations[i],
-                                    previous_dilation=dilation, norm_layer=norm_layer))
+                                    previous_dilation=dilation, norm_layer=norm_layer, prerelres=prerelres))
             else:
                 layers.append(block(self.inplanes, planes, dilation=dilation, previous_dilation=dilation,
-                                    norm_layer=norm_layer))
+                                    norm_layer=norm_layer, prerelres=prerelres))
 
         return nn.Sequential(*layers)
 
