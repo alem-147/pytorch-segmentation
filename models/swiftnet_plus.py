@@ -63,11 +63,17 @@ class BasicBlock(nn.Module):
         relu = self.relu(out)
 
         return relu, out
-# 12392546 params
-class SwiftNetSingleScale(BaseModel):
+
+# base + densepsp module (1,2,3,6): 12673510 params -> 2.2% increase in params -> .6% increase in performance
+# base + densepsp module (1,2,4,8) 12673510 params -> 2.2% increase in params -> no increase
+# TODO - move the primer in the pooling module
+# TODO - compare bnreluconv to convrelubn in the pooling module
+# TODO - non square grids like original spp
+
+class SwiftNetSingleScale_plus(BaseModel):
     def __init__(self, num_classes, backbone='resnet18', num_features=128, k_up=3, use_bn=True,
-                 spp_grids=(8, 4, 2, 1), spp_square_grid=False, pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False):
-        super(SwiftNetSingleScale, self).__init__()
+                 spp_grids=(1,2,4,8), spp_square_grid=False, pretrained=True, use_aux=True, freeze_bn=False, freeze_backbone=False):
+        super(SwiftNetSingleScale_plus, self).__init__()
         self.inplanes = 64
         self.use_aux = use_aux
         self.use_bn = use_bn
@@ -98,9 +104,10 @@ class SwiftNetSingleScale(BaseModel):
         level_size = self.spp_size // num_levels
 
         self.dsn = dsn(256, num_classes)
-        self.spp = SpatialPyramidPooling(self.inplanes, num_levels, bt_size=bt_size, level_size=level_size,
-                                         out_size=self.spp_size, grids=spp_grids, square_grid=spp_square_grid,
-                                         bn_momentum=0.01 / 2, use_bn=self.use_bn)
+        # self.spp = SpatialPyramidPooling(self.inplanes, num_levels, bt_size=bt_size, level_size=level_size,
+        #                                  out_size=self.spp_size, grids=spp_grids, square_grid=spp_square_grid,
+        #                                  bn_momentum=0.01 / 2, use_bn=self.use_bn)
+        self.spp = _DensePSPModule(self.inplanes, spp_grids)
         self.upsample = nn.ModuleList(list(reversed(upsamples)))
 
         self.logits = nn.Sequential(nn.BatchNorm2d(num_features) if self.use_bn else None,
@@ -192,6 +199,80 @@ class SwiftNetSingleScale(BaseModel):
     def freeze_bn(self):
         for module in self.modules():
             if isinstance(module, nn.BatchNorm2d): module.eval()
+
+
+class DensePSPConv(nn.Sequential):
+    def __init__(self, in_channels, out_channels, bin_sz,
+                 drop_rate=0.1, norm_layer=nn.BatchNorm2d, pool_layer=nn.AdaptiveAvgPool2d, up_mode='bilinear'):
+        super(DensePSPConv, self).__init__()
+        self.add_module('pool', pool_layer(output_size=bin_sz))
+        self.add_module('bnreluconv', _BNReluConv(in_channels, out_channels, k=1, batch_norm=True))
+        self.up_mode = up_mode
+
+    def forward(self, x):
+        h, w = x.size()[2], x.size()[3]
+        if self.up_mode == 'bilinear':
+            features = F.interpolate(super(DensePSPConv, self).forward(x), size=(h, w), mode=self.up_mode,
+                                     align_corners=True)
+        else:
+            features = F.interpolate(super(DensePSPConv, self).forward(x), size=(h, w), mode=self.up_mode)
+        return features
+
+
+class _DensePSPStage(nn.Module):
+    def __init__(self, in_channels, out_channels, bin_sz,
+                 drop_rate=0.1, norm_layer=nn.BatchNorm2d, pool_layer=nn.AdaptiveMaxPool2d, up_mode='bilinear',
+                 bin_increase=1,
+                 norm_kwargs=None):
+        super(_DensePSPStage, self).__init__()
+        '''
+        input -> aMaxPool(x) + 
+        '''
+        self.pool1 = nn.AdaptiveMaxPool2d(output_size=bin_sz + bin_increase)
+        self.pool2 = pool_layer(output_size=bin_sz)
+        self.conv = _BNReluConv(in_channels, out_channels, k=1, batch_norm=True)
+        # self.conv = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size=1),
+        #                           norm_layer(out_channels),
+        #                           nn.ReLU(inplace=True))
+        self.up_mode = up_mode
+
+    def forward(self, x):
+        h, w = x.size()[2], x.size()[3]
+        x = self.pool1(x)
+        if self.up_mode == 'bilinear':
+            x = F.interpolate(x, size=(h, w), mode=self.up_mode, align_corners=True)
+        else:
+            x = F.interpolate(x, size=(h, w), mode=self.up_mode)
+        x = self.pool2(x)
+        x = self.conv(x)
+        x = F.interpolate(x, size=(h, w), mode='bilinear', align_corners=True)
+        return x
+
+
+class _DensePSPModule(nn.Module):
+    def __init__(self, in_channels, bin_sizes, level_size=128, final_out=128, norm_layer=nn.BatchNorm2d,
+                 pool_layer=nn.AdaptiveMaxPool2d, up_mode='bilinear', bin_increase=1):
+        super(_DensePSPModule, self).__init__()
+        out_channels = in_channels // len(bin_sizes)
+        # self.primer = _BNReluConv(in_channels, 512, k=1, batch_norm=True)
+        bin1 = DensePSPConv(512, out_channels, bin_sizes[0], norm_layer=norm_layer,
+                            pool_layer=nn.AdaptiveAvgPool2d)
+
+        self.stages = nn.ModuleList([_DensePSPStage(in_channels, out_channels, b_s,
+                                                    norm_layer=norm_layer, pool_layer=pool_layer, up_mode=up_mode,
+                                                    bin_increase=bin_increase)
+                                     for b_s in bin_sizes[1:]])
+        self.stages.insert(0, bin1)
+        self.fuse = _BNReluConv(in_channels+len(bin_sizes)*level_size, final_out, k=1)
+
+    def forward(self, features):
+        h, w = features.size()[2], features.size()[3]
+        pyramids = [features]
+        # features = self.primer(features)
+        pyramids.extend([stage(features) for stage in self.stages])
+        output = self.fuse(torch.cat(pyramids, dim=1))
+        return output
+
 
 class SpatialPyramidPooling(nn.Module):
     """

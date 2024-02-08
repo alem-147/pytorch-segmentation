@@ -1,8 +1,8 @@
 {
-    "name": "SwiftNet-SingleScale-base",
+    "name": "SwiftNet-SingleScale-params",
     "n_gpu": 1,
     "use_synch_bn": false,
-    "_comment": "adjust LR scheduler to match paper min lr",
+    "_comment": "just checking params",
 
     "arch": {
         "type": "SwiftNetSingleScale",
@@ -37,7 +37,7 @@
         "type": "CityScapes",
         "args":{
             "data_dir": "./data/CityScapes",
-            "batch_size": 8,
+            "batch_size": 12,
             "crop_size": 768,
             "val": true,
             "split": "val",
