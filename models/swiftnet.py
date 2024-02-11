@@ -305,14 +305,15 @@ class _UpsampleBlend(nn.Module):
 class SWPyrBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, efficient=True, bn_class=nn.BatchNorm2d, levels=3):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, efficient=True,
+                 norm_layer=nn.BatchNorm2d, levels=3, **kwargs):
         super(SWPyrBlock, self).__init__()
         self.conv1 = convkxk(inplanes, planes, stride)
-        self.bn1 = nn.ModuleList([bn_class(planes) for _ in range(levels)])
+        self.bn1 = nn.ModuleList([norm_layer(planes) for _ in range(levels)])
         self.relu_inp = nn.ReLU(inplace=True)
         self.relu = nn.ReLU(inplace=False)
         self.conv2 = convkxk(planes, planes)
-        self.bn2 = nn.ModuleList([bn_class(planes) for _ in range(levels)])
+        self.bn2 = nn.ModuleList([norm_layer(planes) for _ in range(levels)])
         self.downsample = downsample
         self.stride = stride
         self.efficient = efficient
@@ -349,14 +350,13 @@ class SWPyrBlock(nn.Module):
                                      error_msgs)
 
 class SwiftNetPyramid(BaseModel):
-    def __init__(self, num_classes, block=SWPyrBlock, layers=[2,2,2,2], num_features=128, pyramid_levels=3, use_bn=True, k_bneck=1, k_upsample=3,
-                 efficient=False, align_corners=None, pyramid_subsample='bicubic', output_stride=4, freeze_bn=False, freeze_backbone=False,
-                 use_aux=False, **kwargs):
+    def __init__(self, num_classes, backbone='pyr_resnet18', num_features=128, pyramid_levels=3, use_bn=True, k_bneck=1, k_upsample=3,
+                 align_corners=None, pyramid_subsample='bicubic', output_stride=4, freeze_bn=False, freeze_backbone=False,
+                 pretrained=True, use_aux=False, **kwargs):
+        super(SwiftNetPyramid, self).__init__()
         self.use_aux = use_aux
         self.inplanes = 64
-        self.efficient = efficient
-        super(SwiftNetPyramid, self).__init__()
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+
         self.use_bn = use_bn
         bn_class = nn.BatchNorm2d if use_bn else Identity
 
@@ -367,25 +367,39 @@ class SwiftNetPyramid(BaseModel):
         self.align_corners = align_corners
         self.pyramid_subsample = pyramid_subsample
 
-        self.bn1 = nn.ModuleList([bn_class(64) for _ in range(pyramid_levels)])
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        # self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        # self.bn1 = nn.ModuleList([bn_class(64) for _ in range(pyramid_levels)])
+        # self.relu = nn.ReLU(inplace=True)
+        # self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        model = getattr(resnet, backbone)(pretrained, prerelres=True, norm_layer=nn.BatchNorm2d if use_bn else None,
+                                          pyramid_levels=pyramid_levels)
+
+        self.initial = nn.Sequential(*list(model.children())[:4])
+        self.conv1 = self.initial[0]
+        self.bn1 = self.initial[1]
+        self.relu = self.initial[2]
+        self.maxpool = self.initial[3]
+
         bottlenecks = []
-        self.layer1 = self._make_layer(block, 64, layers[0], bn_class=bn_class)
+        # self.layer1 = self._make_layer(block, 64, layers[0], bn_class=bn_class)
+        self.layer1, self.inplanes = model.layer1, 64
         bottlenecks += [convkxk(self.inplanes, num_features, k=k_bneck)]
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, bn_class=bn_class)
+        # self.layer2 = self._make_layer(block, 128, layers[1], stride=2, bn_class=bn_class)
+        self.layer2, self.inplanes = model.layer2, 128
         bottlenecks += [convkxk(self.inplanes, num_features, k=k_bneck)]
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, bn_class=bn_class)
+        # self.layer3 = self._make_layer(block, 256, layers[2], stride=2, bn_class=bn_class)
+        self.layer3, self.inplanes = model.layer3, 256
         bottlenecks += [convkxk(self.inplanes, num_features, k=k_bneck)]
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, bn_class=bn_class)
+        # self.layer4 = self._make_layer(block, 512, layers[3], stride=2, bn_class=bn_class)
+        self.layer4, self.inplanes = model.layer4, 512
         bottlenecks += [convkxk(self.inplanes, num_features, k=k_bneck)]
+
 
         # num_bn_remove = max(0, int(log2(output_stride) - 2))
         num_bn_remove = 0
         self.num_skip_levels = self.pyramid_levels + 3 - num_bn_remove
         bottlenecks = bottlenecks[num_bn_remove:]
-
-        self.fine_tune = [self.conv1, self.maxpool, self.layer1, self.layer2, self.layer3, self.layer4, self.bn1]
 
         self.upsample_bottlenecks = nn.ModuleList(bottlenecks[::-1])
         num_pyr_modules = 2 + pyramid_levels - num_bn_remove
@@ -399,16 +413,8 @@ class SwiftNetPyramid(BaseModel):
         self.logits = nn.Sequential(bn_class(num_features),
                                     nn.ReLU(inplace=self.use_bn),
                                     nn.Conv2d(num_features, num_classes, kernel_size=1))
-        self.random_init = [self.upsample_bottlenecks, self.upsample_blends]
 
-        self.features = num_features
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+        initialize_weights(self.upsample_bottlenecks, self.upsample_blends, self.logits)
 
     def _make_layer(self, block, planes, blocks, stride=1, bn_class=nn.BatchNorm2d):
         downsample = None
@@ -425,11 +431,6 @@ class SwiftNetPyramid(BaseModel):
             layers.append(block(self.inplanes, planes, levels=self.pyramid_levels))
 
         return nn.Sequential(*layers)
-    # def random_init_params(self):
-    #     return chain(*[f.parameters() for f in self.random_init])
-    #
-    # def fine_tune_params(self):
-    #     return chain(*[f.parameters() for f in self.fine_tune])
 
     def forward_resblock(self, x, layers, idx):
         skip = None
@@ -444,7 +445,6 @@ class SwiftNetPyramid(BaseModel):
         x = self.bn1[idx](x)
         x = self.relu(x)
         x = self.maxpool(x)
-
         features = []
         x, skip = self.forward_resblock(x, self.layer1, idx)
         features += [skip]
@@ -492,13 +492,13 @@ class SwiftNetPyramid(BaseModel):
     def freeze_bn(self):
         for module in self.modules():
             if isinstance(module, nn.BatchNorm2d): module.eval()
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        super(SwiftNetPyramid, self)._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys,
-                                                  unexpected_keys, error_msgs)
-        for bn in self.bn1:
-            bn._load_from_state_dict(state_dict, prefix + 'bn1.', local_metadata, strict, missing_keys, unexpected_keys,
-                                     error_msgs)
+    # def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+    #                           missing_keys, unexpected_keys, error_msgs):
+    #     super(SwiftNetPyramid, self)._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys,
+    #                                               unexpected_keys, error_msgs)
+    #     for bn in self.bn1:
+    #         bn._load_from_state_dict(state_dict, prefix + 'bn1.', local_metadata, strict, missing_keys, unexpected_keys,
+    #                                  error_msgs)
 
 
 if __name__ == '__main__':

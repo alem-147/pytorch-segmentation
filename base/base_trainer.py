@@ -8,6 +8,7 @@ from torch.utils import tensorboard
 from utils import helpers
 from utils import logger
 import utils.lr_scheduler
+import torch.optim as optim
 from utils.sync_batchnorm import convert_model
 from utils.sync_batchnorm import DataParallelWithCallback
 
@@ -66,13 +67,22 @@ class BaseTrainer:
         else:
             trainable_params = filter(lambda p:p.requires_grad, self.model.parameters())
         self.optimizer = get_instance(torch.optim, 'optimizer', config, trainable_params)
-        self.lr_scheduler = getattr(utils.lr_scheduler, config['lr_scheduler']['type'])(self.optimizer, self.epochs, len(train_loader))
+        if 'torch' in config['lr_scheduler'] and config['lr_scheduler']['torch']:
+            # print('args', (3, *tuple(config['lr_scheduler']['args'].values())))
+            self.lr_scheduler = getattr(optim.lr_scheduler,
+                                             config['lr_scheduler']['type'])(self.optimizer,
+                                                                             *config['lr_scheduler']['args'].values(),
+                                                                             **config['lr_scheduler']['kwargs'])
+            self.logger.warning(f"Using pytorch lr_scheduler: {config['lr_scheduler']['type']} - last lr {self.lr_scheduler.get_last_lr()}")
+        else:
+            self.lr_scheduler = getattr(utils.lr_scheduler, config['lr_scheduler']['type'])(self.optimizer, self.epochs,
+                                                                                            len(train_loader))
 
         # MONITORING
         self.monitor = cfg_trainer.get('monitor', 'off')
         if self.monitor == 'off':
             self.mnt_mode = 'off'
-            self.mnt_best = 0
+            self.mcehdulernt_best = 0
         else:
             self.mnt_mode, self.mnt_metric = self.monitor.split()
             assert self.mnt_mode in ['min', 'max']

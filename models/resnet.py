@@ -16,7 +16,7 @@ except ImportError:
     from urllib.request import urlretrieve
 
 from itertools import chain
-
+from models.swiftnet import SWPyrBlock
 
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
            'resnet152', 'BasicBlock', 'Bottleneck']
@@ -41,7 +41,7 @@ class BasicBlock(nn.Module):
     """
     expansion = 1
     def __init__(self, inplanes, planes, stride=1, dilation=1, downsample=None, previous_dilation=1,
-                 norm_layer=None, prerelres=False):
+                 norm_layer=None, prerelres=False, **kwargs):
         super(BasicBlock, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=3, stride=stride,
                                padding=dilation, dilation=dilation, bias=False)
@@ -82,7 +82,7 @@ class Bottleneck(nn.Module):
     # pylint: disable=unused-argument
     expansion = 4
     def __init__(self, inplanes, planes, stride=1, dilation=1,
-                 downsample=None, previous_dilation=1, norm_layer=None, prerelres=False):
+                 downsample=None, previous_dilation=1, norm_layer=None, prerelres=False, **kwargs):
         super(Bottleneck, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn1 = norm_layer(planes)
@@ -137,9 +137,11 @@ class ResNet(nn.Module):
     """
     # pylint: disable=unused-variable
     def __init__(self, block, layers, num_classes=1000, dilated=False, multi_grid=False,
-                 deep_base=True, norm_layer=nn.BatchNorm2d, prerelres=False):
+                 deep_base=True, norm_layer=nn.BatchNorm2d, prerelres=False, pyramid_levels=1):
         self.inplanes = 128 if deep_base else 64
         super(ResNet, self).__init__()
+        self.pyramid_levels=pyramid_levels
+
         if deep_base:
             self.conv1 = nn.Sequential(
                 nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1, bias=False),
@@ -153,26 +155,30 @@ class ResNet(nn.Module):
         else:
             self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
                                    bias=False)
-        self.bn1 = norm_layer(self.inplanes)
+        if pyramid_levels == 1:
+            self.bn1 = norm_layer(self.inplanes)
+        else:
+            self.bn1 = nn.ModuleList([norm_layer(self.inplanes) for _ in range(pyramid_levels)])
+
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0], norm_layer=norm_layer, prerelres=prerelres)
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, norm_layer=norm_layer, prerelres=prerelres)
+        self.layer1 = self._make_layer(block, 64, layers[0], norm_layer=norm_layer, prerelres=prerelres, levels=pyramid_levels)
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, norm_layer=norm_layer, prerelres=prerelres, levels=pyramid_levels)
         if dilated:
             self.layer3 = self._make_layer(block, 256, layers[2], stride=1,
-                                           dilation=2, norm_layer=norm_layer, prerelres=prerelres)
+                                           dilation=2, norm_layer=norm_layer, prerelres=prerelres, levels=pyramid_levels)
             if multi_grid:
                 self.layer4 = self._make_layer(block, 512, layers[3], stride=1,
                                                dilation=4, norm_layer=norm_layer,
-                                               multi_grid=True, prerelres=prerelres)
+                                               multi_grid=True, prerelres=prerelres, levels=pyramid_levels)
             else:
                 self.layer4 = self._make_layer(block, 512, layers[3], stride=1,
-                                               dilation=4, norm_layer=norm_layer, prerelres=prerelres)
+                                               dilation=4, norm_layer=norm_layer, prerelres=prerelres, levels=pyramid_levels)
         else:
             self.layer3 = self._make_layer(block, 256, layers[2], stride=2,
-                                           norm_layer=norm_layer, prerelres=prerelres)
+                                           norm_layer=norm_layer, prerelres=prerelres, levels=pyramid_levels)
             self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
-                                           norm_layer=norm_layer, prerelres=prerelres)
+                                           norm_layer=norm_layer, prerelres=prerelres, levels=pyramid_levels)
         self.avgpool = nn.AvgPool2d(7, stride=1)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
@@ -184,7 +190,7 @@ class ResNet(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
-    def _make_layer(self, block, planes, blocks, stride=1, dilation=1, norm_layer=None, multi_grid=False, prerelres=False):
+    def _make_layer(self, block, planes, blocks, stride=1, dilation=1, norm_layer=None, multi_grid=False, prerelres=False, levels=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -197,13 +203,16 @@ class ResNet(nn.Module):
         multi_dilations = [4, 8, 16]
         if multi_grid:
             layers.append(block(self.inplanes, planes, stride, dilation=multi_dilations[0],
-                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer, prerelres=prerelres))
+                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer,
+                                prerelres=prerelres, levels=levels)) # swiftnet stuff
         elif dilation == 1 or dilation == 2:
             layers.append(block(self.inplanes, planes, stride, dilation=1,
-                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer, prerelres=prerelres))
+                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer,
+                                prerelres=prerelres, levels=levels))
         elif dilation == 4:
             layers.append(block(self.inplanes, planes, stride, dilation=2,
-                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer, prerelres=prerelres))
+                                downsample=downsample, previous_dilation=dilation, norm_layer=norm_layer,
+                                prerelres=prerelres, levels=levels))
         else:
             raise RuntimeError("=> unknown dilation size: {}".format(dilation))
 
@@ -211,10 +220,12 @@ class ResNet(nn.Module):
         for i in range(1, blocks):
             if multi_grid:
                 layers.append(block(self.inplanes, planes, dilation=multi_dilations[i],
-                                    previous_dilation=dilation, norm_layer=norm_layer, prerelres=prerelres))
+                                    previous_dilation=dilation, norm_layer=norm_layer,
+                                    prerelres=prerelres, levels=levels))
             else:
-                layers.append(block(self.inplanes, planes, dilation=dilation, previous_dilation=dilation,
-                                    norm_layer=norm_layer, prerelres=prerelres))
+                layers.append(block(self.inplanes, planes, dilation=dilation,
+                                    previous_dilation=dilation, norm_layer=norm_layer,
+                                    prerelres=prerelres, levels=levels))
 
         return nn.Sequential(*layers)
 
@@ -238,13 +249,21 @@ class ResNet(nn.Module):
     def get_backbone_params(self):
         return chain(self.initial.parameters(), self.layer1.parameters(), self.layer2.parameters(),
                    self.layer3.parameters(), self.layer4.parameters())
-
     def get_decoder_params(self):
         return chain(self.master_branch.parameters(), self.auxiliary_branch.parameters())
 
     def freeze_bn(self):
         for module in self.modules():
             if isinstance(module, nn.BatchNorm2d): module.eval()
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        super(ResNet, self)._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys,
+                                                  unexpected_keys, error_msgs)
+        if self.pyramid_levels > 1:
+            for bn in self.bn1:
+                bn._load_from_state_dict(state_dict, prefix + 'bn1.', local_metadata, strict, missing_keys, unexpected_keys,
+                                         error_msgs)
 
 def resnet18(pretrained=False, **kwargs):
     """Constructs a ResNet-18 model.
@@ -257,6 +276,16 @@ def resnet18(pretrained=False, **kwargs):
         model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
     return model
 
+def pyr_resnet18(pretrained=False, **kwargs):
+    """Constructs a ResNet-18 model.
+
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNet(SWPyrBlock, [2, 2, 2, 2], deep_base=False, **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']), strict=False)
+    return model
 
 def resnet34(pretrained=False, **kwargs):
     """Constructs a ResNet-34 model.
