@@ -118,14 +118,7 @@ class SwiftNetSingleScale_plus(BaseModel):
 
         self.num_features = num_classes
 
-        # may need to modify where this does this bc resnet is pretrained
-        print(self.modules())
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+        initialize_weights(self.spp, self.upsample, self.logits)
 
         if freeze_bn: self.freeze_bn()
         if freeze_backbone:
