@@ -492,15 +492,156 @@ class SwiftNetPyramid(BaseModel):
     def freeze_bn(self):
         for module in self.modules():
             if isinstance(module, nn.BatchNorm2d): module.eval()
-    # def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-    #                           missing_keys, unexpected_keys, error_msgs):
-    #     super(SwiftNetPyramid, self)._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys,
-    #                                               unexpected_keys, error_msgs)
-    #     for bn in self.bn1:
-    #         bn._load_from_state_dict(state_dict, prefix + 'bn1.', local_metadata, strict, missing_keys, unexpected_keys,
-    #                                  error_msgs)
+
+# 12270287 params
+class SwiftNetEnsemble(BaseModel):
+    def __init__(self, num_classes, backbone='pyr_resnet18', num_features=128, pyramid_levels=3, use_bn=True, k_bneck=1, k_upsample=3,
+                 align_corners=None, pyramid_subsample='bicubic', output_stride=4, freeze_bn=False, freeze_backbone=False,
+                 pretrained=True, use_aux=False, spp_grids=(8, 4, 2, 1), spp_square_grid=False, **kwargs):
+        super(SwiftNetEnsemble, self).__init__()
+        self.use_aux = use_aux
+        self.inplanes = 64
+
+        self.use_bn = use_bn
+        bn_class = nn.BatchNorm2d if use_bn else Identity
+
+        self.pyramid_levels = pyramid_levels
+        self.num_features = num_features
+        self.replicated = False
+
+        self.align_corners = align_corners
+        self.pyramid_subsample = pyramid_subsample
+
+        model = getattr(resnet, backbone)(pretrained, prerelres=True, norm_layer=nn.BatchNorm2d if use_bn else None,
+                                          pyramid_levels=pyramid_levels)
+
+        self.initial = nn.Sequential(*list(model.children())[:4])
+        self.conv1 = self.initial[0]
+        self.bn1 = self.initial[1]
+        self.relu = self.initial[2]
+        self.maxpool = self.initial[3]
+
+        bottlenecks = []
+        # self.layer1 = self._make_layer(block, 64, layers[0], bn_class=bn_class)
+        self.layer1, self.inplanes = model.layer1, 64
+        bottlenecks += [convkxk(self.inplanes, num_features, k=k_bneck)]
+        # self.layer2 = self._make_layer(block, 128, layers[1], stride=2, bn_class=bn_class)
+        self.layer2, self.inplanes = model.layer2, 128
+        bottlenecks += [convkxk(self.inplanes, num_features, k=k_bneck)]
+        # self.layer3 = self._make_layer(block, 256, layers[2], stride=2, bn_class=bn_class)
+        self.layer3, self.inplanes = model.layer3, 256
+        bottlenecks += [convkxk(self.inplanes, num_features, k=k_bneck)]
+        # self.layer4 = self._make_layer(block, 512, layers[3], stride=2, bn_class=bn_class)
+        self.layer4, self.inplanes = model.layer4, 512
 
 
+        num_levels = 3
+        level_size = num_features // num_levels
+        self.spp = SpatialPyramidPooling(self.inplanes, num_levels, bt_size=num_features, level_size=level_size,
+                                         out_size=self.inplanes, grids=spp_grids, square_grid=spp_square_grid,
+                                         bn_momentum=0.01 / 2, use_bn=self.use_bn)
+
+        bottlenecks += [convkxk(self.inplanes, num_features, k=k_bneck)]
+
+        # num_bn_remove = max(0, int(log2(output_stride) - 2))
+        num_bn_remove = 0
+        self.num_skip_levels = self.pyramid_levels + 3 - num_bn_remove
+        bottlenecks = bottlenecks[num_bn_remove:]
+
+        self.upsample_bottlenecks = nn.ModuleList(bottlenecks[::-1])
+        num_pyr_modules = 2 + pyramid_levels - num_bn_remove
+
+        self.upsample_blends = nn.ModuleList(
+            [_UpsampleBlend(num_features,
+                            use_bn=use_bn,
+                            k=k_upsample)
+             for i in range(num_pyr_modules)])
+
+        self.logits = nn.Sequential(bn_class(num_features),
+                                    nn.ReLU(inplace=self.use_bn),
+                                    nn.Conv2d(num_features, num_classes, kernel_size=1))
+
+        initialize_weights(self.upsample_bottlenecks, self.upsample_blends, self.logits)
+
+    def _make_layer(self, block, planes, blocks, stride=1, bn_class=nn.BatchNorm2d):
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                bn_class(planes * block.expansion),
+            )
+
+        layers = [block(self.inplanes, planes, stride=stride, downsample=downsample, levels=self.pyramid_levels)]
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes, levels=self.pyramid_levels))
+
+        return nn.Sequential(*layers)
+
+    def forward_resblock(self, x, layers, idx):
+        skip = None
+        for l in layers:
+            x = l(x) if not isinstance(l, SWPyrBlock) else l(x, idx)
+            if isinstance(x, tuple):
+                x, skip = x
+        return x, skip
+
+    def forward_down(self, image, skips, idx=-1):
+        x = self.conv1(image)
+        x = self.bn1[idx](x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        features = []
+        x, skip = self.forward_resblock(x, self.layer1, idx)
+        features += [skip]
+        x, skip = self.forward_resblock(x, self.layer2, idx)
+        features += [skip]
+        x, skip = self.forward_resblock(x, self.layer3, idx)
+        features += [skip]
+        x, skip = self.forward_resblock(x, self.layer4, idx)
+        features += [self.spp.forward(skip)]
+        # features += [skip]
+
+        skip_feats = [b(f) for b, f in zip(self.upsample_bottlenecks, reversed(features))]
+
+        for i, s in enumerate(reversed(skip_feats)):
+            skips[idx + i] += [s]
+
+        return skips
+
+    def forward(self, image):
+        input_size = (image.size()[2], image.size()[3])
+        pyramid = [image]
+        for l in range(1, self.pyramid_levels):
+            pyramid += [F.interpolate(image, scale_factor=1 / 2 ** l, mode=self.pyramid_subsample,
+                                      align_corners=self.align_corners)]
+        skips = [[] for _ in range(self.num_skip_levels)]
+        additional = {'pyramid': pyramid}
+        for idx, p in enumerate(pyramid):
+            skips = self.forward_down(p, skips, idx=idx)
+        skips = skips[::-1]
+        x = skips[0][0]
+        for i, (sk, blend) in enumerate(zip(skips[1:], self.upsample_blends)):
+            x = blend(x, sum(sk))
+        if self.use_aux == True:
+            #don't do this
+            return x, additional
+        else:
+            x = self.logits(x)
+            x = F.interpolate(x, size=input_size, mode='bilinear')
+            return x
+    def get_backbone_params(self):
+        return chain(self.conv1.parameters(), self.maxpool.parameters(), self.layer1.parameters(),
+                     self.layer2.parameters(), self.layer3.parameters(), self.layer4.parameters(), self.bn1.parameters(),
+                     self.relu.parameters())
+    def get_decoder_params(self):
+        return chain(self.upsample_bottlenecks.parameters(), self.upsample_blends.parameters(),
+                     self.spp.parameters(), self.logits.parameters())
+
+    def freeze_bn(self):
+        for module in self.modules():
+            if isinstance(module, nn.BatchNorm2d): module.eval()
 if __name__ == '__main__':
     i = torch.Tensor(1, 3, 512, 512).cuda()
     m = SwiftNetSingleScale(pretrained=False).cuda()
